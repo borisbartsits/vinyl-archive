@@ -1,0 +1,1629 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
+  <title>Vinyl Archive</title>
+  <link rel="manifest" href="manifest.json"/>
+  <meta name="theme-color" content="#13100c"/>
+  <meta name="apple-mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-title" content="Vinyl Archive"/>
+  <link rel="apple-touch-icon" href="icon.svg"/>
+  <style>*{box-sizing:border-box;margin:0;padding:0}body{background:#13100c}#root{min-height:100vh}#splash{position:fixed;inset:0;background:#13100c;display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:9999}.sp-ring{width:44px;height:44px;border:3px solid #352c1c;border-top-color:#c8821e;border-radius:50%;animation:spin .8s linear infinite;margin-bottom:14px}@keyframes spin{to{transform:rotate(360deg)}}#errmsg{position:fixed;inset:0;background:#13100c;display:none;color:#e08080;font:12px monospace;padding:20px;overflow:auto;white-space:pre-wrap;z-index:9999}</style>
+</head>
+<body>
+  <div id="splash"><div class="sp-ring"></div><div style="color:#8a7454;font:14px Georgia,serif">Vinyl Archive</div></div>
+  <div id="errmsg"></div>
+  <div id="root"></div>
+  <script>window.onerror=function(m,s,l,c,e){document.getElementById("splash").style.display="none";var d=document.getElementById("errmsg");d.style.display="block";d.textContent="ERROR: "+m+"\nLine: "+l+"\n\n"+(e?e.stack:"")};</script>
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.23.2/babel.min.js"></script>
+  <script type="text/babel">
+const { useState, useEffect, useRef } = React;
+const XLSX = window.XLSX;
+window.storage = {
+  set: async (k,v) => { try{localStorage.setItem(k,v);}catch{} return {key:k,value:v}; },
+  get: async (k) => { const v=localStorage.getItem(k); return v?{key:k,value:v}:null; },
+  delete: async (k) => { localStorage.removeItem(k); return {key:k,deleted:true}; },
+  list: async (prefix) => { const keys=Object.keys(localStorage).filter(k=>!prefix||k.startsWith(prefix)); return {keys}; }
+};
+
+const IN_CLAUDE = (window.self !== window.top);
+const API = IN_CLAUDE ? "https://api.anthropic.com/v1/messages" : "/.netlify/functions/claude";
+const SB_URL = "https://xbjdeltxdqrwgemtycii.supabase.co";
+const SB_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhiamRlbHR4ZHFyd2dlbXR5Y2lpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk3MzgyNDgsImV4cCI6MjA5NTMxNDI0OH0.n2KrFakhS1F3zAjUUdPU4gqCKxqZurMIsYbVmNw6cuE";
+// ── Supabase helpers ───────────────────────────────────────────────────────
+let _token = SB_KEY; // replaced with user JWT after login
+let _userId = null;
+
+function sbHeaders() {
+  return {
+    "apikey": SB_KEY,
+    "Authorization": "Bearer " + _token,
+    "Content-Type": "application/json",
+  };
+}
+
+async function authSignUp(email, password) {
+  const r = await fetch(SB_URL + "/auth/v1/signup", {
+    method: "POST",
+    headers: { "apikey": SB_KEY, "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password }),
+  });
+  const d = await r.json();
+  if (!r.ok) throw new Error(d.error_description || d.msg || "Ошибка регистрации");
+  return d;
+}
+
+async function authSignIn(email, password) {
+  const r = await fetch(SB_URL + "/auth/v1/token?grant_type=password", {
+    method: "POST",
+    headers: { "apikey": SB_KEY, "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password }),
+  });
+  const d = await r.json();
+  if (!r.ok) throw new Error(d.error_description || d.msg || "Неверный email или пароль");
+  _token  = d.access_token;
+  _userId = d.user?.id;
+  return d;
+}
+
+async function authSignOut() {
+  await fetch(SB_URL + "/auth/v1/logout", {
+    method: "POST", headers: sbHeaders(),
+  }).catch(() => {});
+  _token = SB_KEY; _userId = null;
+}
+
+async function dbGetAll() {
+  const r = await fetch(SB_URL + "/rest/v1/albums?select=*&order=artist.asc", { headers: sbHeaders() });
+  if (!r.ok) throw new Error("DB read: " + r.status);
+  const rows = await r.json();
+  return rows.map(row => ({
+    id: row.id, artist: row.artist, album: row.album, year: row.year,
+    genre: row.genre, label: row.label, country: row.country,
+    condition: row.condition, tracks: row.tracks || [], price: row.price,
+    notes: row.notes, thumb: row.thumb, thumbFront: row.thumb_front,
+    thumbBack: row.thumb_back, at: row.at,
+  }));
+}
+
+async function dbSave(rec) {
+  const row = {
+    id: rec.id, artist: rec.artist, album: rec.album, year: rec.year,
+    genre: rec.genre, label: rec.label, country: rec.country,
+    condition: rec.condition || null, tracks: rec.tracks || [],
+    price: rec.price || null, notes: rec.notes || null,
+    thumb: rec.thumb || null, thumb_front: rec.thumbFront || rec.thumb || null,
+    thumb_back: rec.thumbBack || null, at: rec.at || new Date().toISOString(),
+    user_id: _userId,
+  };
+  const r = await fetch(SB_URL + "/rest/v1/albums", {
+    method: "POST",
+    headers: { ...sbHeaders(), "Prefer": "resolution=merge-duplicates,return=minimal" },
+    body: JSON.stringify(row),
+  });
+  if (!r.ok) throw new Error("DB save: " + r.status);
+}
+
+async function dbDelete(id) {
+  const r = await fetch(SB_URL + "/rest/v1/albums?id=eq." + encodeURIComponent(id), {
+    method: "DELETE", headers: sbHeaders(),
+  });
+  if (!r.ok) throw new Error("DB delete: " + r.status);
+}
+
+const C = {
+  bg: "#13100c", surface: "#1c1710", card: "#252018", cardHover: "#2e2820",
+  accent: "#c8821e", text: "#f0e2c0", muted: "#8a7454",
+  faint: "#3a2e1e", border: "#352c1c", danger: "#7a2020", dangerText: "#e08080",
+};
+
+const CONDITIONS = [
+  { key: "M",   label: "Mint",  color: "#5aaa5a", bg: "#0e2a0e", mult: 1.5  },
+  { key: "VG+", label: "VG+",   color: "#4a9aaa", bg: "#0a2028", mult: 1.0  },
+  { key: "VG",  label: "VG",    color: "#c8a030", bg: "#281e08", mult: 0.6  },
+  { key: "G",   label: "Good",  color: "#c06030", bg: "#281408", mult: 0.25 },
+];
+
+function condFor(key) { return CONDITIONS.find(c => c.key === key) || CONDITIONS[1]; }
+
+const SEED = [{"id": "vin:1000000000000", "artist": "Pink Floyd", "album": "The Dark Side of the Moon", "year": "1973", "genre": "Progressive Rock", "label": "Лютеранская Церковь России (1992)", "country": "USSR/Russia", "tracks": [{"side": "A", "number": 1, "title": "Speak to Me / Поговори со мной", "duration": "3:58"}, {"side": "A", "number": 2, "title": "Breathe / Дыши", "duration": null}, {"side": "A", "number": 3, "title": "On the Run / На бегу", "duration": "3:35"}, {"side": "A", "number": 4, "title": "Time / Время", "duration": "7:05"}, {"side": "A", "number": 5, "title": "The Great Gig in the Sky / Грандиозный концерт на небесах", "duration": "4:47"}, {"side": "B", "number": 1, "title": "Money / Деньги", "duration": "6:23"}, {"side": "B", "number": 2, "title": "Us and Them / Нам и им", "duration": "7:50"}, {"side": "B", "number": 3, "title": "Any Colour You Like / Цвет, который тебе нравится", "duration": "3:26"}, {"side": "B", "number": 4, "title": "Brain Damage / Тронутый", "duration": "3:50"}, {"side": "B", "number": 5, "title": "Eclipse / Затмение", "duration": "2:01"}], "notes": "Русское издание 1992 г. Продюсерский центр рок-и-ролльных приходов Евангелическо-Лютеранской Церкви, СПб.", "at": "2026-05-25T00:00:00.000Z", "price": {"low": 5, "median": 15, "high": 30, "currency": "USD", "note": "Российское издание 1992 г. (заблокировано на Discogs)", "url": "https://www.discogs.com/release/9448134-Pink-Floyd-The-Dark-Side-Of-The-Moon"}}, {"id": "vin:1000000000001", "artist": "The Beatles", "album": "A Hard Day's Night", "year": "1964", "genre": "Rock / Beat", "label": "Parlophone (PCS 3058)", "country": "UK", "tracks": [{"side": "A", "number": 1, "title": "A Hard Day's Night", "duration": null}, {"side": "A", "number": 2, "title": "I Should Have Known Better", "duration": null}, {"side": "A", "number": 3, "title": "If I Fell", "duration": null}, {"side": "A", "number": 4, "title": "I'm Happy Just to Dance with You", "duration": null}, {"side": "A", "number": 5, "title": "And I Love Her", "duration": null}, {"side": "A", "number": 6, "title": "Tell Me Why", "duration": null}, {"side": "A", "number": 7, "title": "Can't Buy Me Love", "duration": null}, {"side": "B", "number": 1, "title": "Any Time at All", "duration": null}, {"side": "B", "number": 2, "title": "I'll Cry Instead", "duration": null}, {"side": "B", "number": 3, "title": "Things We Said Today", "duration": null}, {"side": "B", "number": 4, "title": "When I Get Home", "duration": null}, {"side": "B", "number": 5, "title": "You Can't Do That", "duration": null}, {"side": "B", "number": 6, "title": "I'll Be Back", "duration": null}], "notes": "Саундтрек к одноимённому фильму. Стерео. Произведено и напечатано в Великобритании. George Martin — продюсер.", "at": "2026-05-25T00:00:00.000Z", "price": {"low": 20, "median": 50, "high": 120, "currency": "USD", "note": "UK стерео. Цена зависит от года прессовки.", "url": "https://www.discogs.com/master/27928-The-Beatles-A-Hard-Days-Night"}}, {"id": "vin:1000000000002", "artist": "Queen", "album": "A Night at the Opera", "year": "1975", "genre": "Rock", "label": "Santa Records Ltd (1994)", "country": "UK", "tracks": [{"side": "A", "number": 1, "title": "Death on Two Legs (Dedicated to...)", "duration": null}, {"side": "A", "number": 2, "title": "Lazing on a Sunday Afternoon", "duration": null}, {"side": "A", "number": 3, "title": "I'm in Love with My Car", "duration": null}, {"side": "A", "number": 4, "title": "You're My Best Friend", "duration": null}, {"side": "A", "number": 5, "title": "'39", "duration": null}, {"side": "A", "number": 6, "title": "Sweet Lady", "duration": null}, {"side": "A", "number": 7, "title": "Seaside Rendezvous", "duration": null}, {"side": "B", "number": 1, "title": "The Prophet's Song", "duration": null}, {"side": "B", "number": 2, "title": "Love of My Life", "duration": null}, {"side": "B", "number": 3, "title": "Good Company", "duration": null}, {"side": "B", "number": 4, "title": "Bohemian Rhapsody", "duration": null}, {"side": "B", "number": 5, "title": "God Save the Queen", "duration": null}], "notes": "Издание 1994 г., Santa Records. Produced by Roy Thomas Baker and Queen. Executive Engineer Mike Stone.", "at": "2026-05-25T00:00:00.000Z", "price": {"low": 10, "median": 20, "high": 35, "currency": "USD", "note": "Издание Santa Records 1994. Оригинал 1975 UK — $15–45.", "url": "https://www.discogs.com/master/5863-Queen-A-Night-At-The-Opera"}}, {"id": "vin:1000000000003", "artist": "Stevie Wonder", "album": "Greatest Hits", "year": null, "genre": "Soul / R&B", "label": "Balkanton (BTA 11920)", "country": "Bulgaria", "tracks": [{"side": "A", "number": 1, "title": "Love Light in Flight", "duration": null}, {"side": "A", "number": 2, "title": "Go Home", "duration": null}, {"side": "A", "number": 3, "title": "I Just Called to Say I Love You", "duration": null}, {"side": "A", "number": 4, "title": "The Woman in Red", "duration": null}, {"side": "A", "number": 5, "title": "Never in Your Sun", "duration": null}, {"side": "B", "number": 1, "title": "Pain", "duration": null}, {"side": "B", "number": 2, "title": "Boogie on Reggae Woman", "duration": null}, {"side": "B", "number": 3, "title": "Whereabouts", "duration": null}, {"side": "B", "number": 4, "title": "Don't Drive Drunk", "duration": null}, {"side": "B", "number": 5, "title": "Overjoyed", "duration": null}], "notes": "Болгарское издание. Made in Bulgaria. Manufactured under license.", "at": "2026-05-25T00:00:00.000Z", "price": {"low": 5, "median": 10, "high": 18, "currency": "USD", "note": "Болгарское издание Balkanton. Редкое для своего региона.", "url": "https://www.discogs.com/release/13687883-Stevie-Wonder-Greatest-Hits"}}, {"id": "vin:1000000000004", "artist": "Queen", "album": "The Game", "year": "1980", "genre": "Rock", "label": "EMI (EMA 795)", "country": "UK", "tracks": [{"side": "A", "number": 1, "title": "Play the Game", "duration": null}, {"side": "A", "number": 2, "title": "Dragon Attack", "duration": null}, {"side": "A", "number": 3, "title": "Another One Bites the Dust", "duration": null}, {"side": "A", "number": 4, "title": "Need Your Loving Tonight", "duration": null}, {"side": "A", "number": 5, "title": "Crazy Little Thing Called Love", "duration": null}, {"side": "B", "number": 1, "title": "Rock It (Prime Jive)", "duration": null}, {"side": "B", "number": 2, "title": "Don't Try Suicide", "duration": null}, {"side": "B", "number": 3, "title": "Sail Away Sweet Sister", "duration": null}, {"side": "B", "number": 4, "title": "Coming Soon", "duration": null}, {"side": "B", "number": 5, "title": "Save Me", "duration": null}], "notes": "Produced by Queen. Engineered and co-produced by Mack. 1980.", "at": "2026-05-25T00:00:00.000Z", "price": {"low": 10, "median": 22, "high": 45, "currency": "USD", "note": "UK оригинал EMI 1980. Версия с фольгированной обложкой дороже.", "url": "https://www.discogs.com/master/13248-Queen-The-Game"}}];
+
+async function smartCropToB64(file, targetPx = 320) {
+  let bitmap;
+  try { bitmap = await createImageBitmap(file); }
+  catch {
+    bitmap = await new Promise((res, rej) => {
+      const img = new Image();
+      const u = URL.createObjectURL(file);
+      const t = setTimeout(() => { URL.revokeObjectURL(u); rej(); }, 10000);
+      img.onload = () => { clearTimeout(t); URL.revokeObjectURL(u); res(img); };
+      img.onerror = () => { clearTimeout(t); URL.revokeObjectURL(u); rej(); };
+      img.src = u;
+    });
+  }
+  const { width: W, height: H } = bitmap;
+  const scale = Math.min(1, 800 / Math.max(W, H));
+  const sw = Math.round(W * scale), sh = Math.round(H * scale);
+  const cv = document.createElement("canvas");
+  cv.width = sw; cv.height = sh;
+  const ctx = cv.getContext("2d");
+  ctx.drawImage(bitmap, 0, 0, sw, sh);
+  const d = ctx.getImageData(0, 0, sw, sh).data;
+
+  // Helper: avg color of a rect
+  const avgColor = (x0, y0, x1, y1) => {
+    let r=0,g=0,b=0,n=0;
+    for(let y=y0;y<y1;y++) for(let x=x0;x<x1;x++){
+      const i=(y*sw+x)*4; r+=d[i];g+=d[i+1];b+=d[i+2];n++;
+    }
+    return n ? [r/n,g/n,b/n] : [0,0,0];
+  };
+  const colorDist = (a, b) => Math.sqrt((a[0]-b[0])**2+(a[1]-b[1])**2+(a[2]-b[2])**2);
+  const rowAvg = (r, cx, hw) => avgColor(Math.max(0,cx-hw), r, Math.min(sw,cx+hw), r+1);
+
+  const bdr = 4; const cx = sw>>1; const strip = sw/5|0;
+  const bgTop = avgColor(cx-strip/2|0, 0, cx+strip/2|0, bdr);
+  const bgBot = avgColor(cx-strip/2|0, sh-bdr, cx+strip/2|0, sh);
+
+  // Scan top→down
+  let top = sh>>3;
+  for(let r=0; r<sh>>1; r++){
+    if(colorDist(rowAvg(r,cx,strip>>1), bgTop) > 45){ top = Math.max(0,r-3); break; }
+  }
+  // Scan bottom→up
+  let bot = sh*7>>3;
+  for(let r=sh-1; r>sh>>1; r--){
+    if(colorDist(rowAvg(r,cx,strip>>1), bgBot) > 45){ bot = Math.min(sh-1,r+3); break; }
+  }
+
+  // Left/right: center-of-gravity of vertical edges
+  const smooth = (arr, k=15) => {
+    const out = new Float32Array(arr.length);
+    for(let i=0;i<arr.length;i++){
+      let s=0,n=0; for(let j=Math.max(0,i-k);j<Math.min(arr.length,i+k);j++){s+=arr[j];n++;} out[i]=s/n;
+    }
+    return out;
+  };
+  const vSum = new Float32Array(sw);
+  for(let y=1;y<sh;y++) for(let x=1;x<sw;x++){
+    const i=(y*sw+x)*4; const p=(y*sw+x-1)*4;
+    vSum[x] += Math.abs(d[i]-d[p])+Math.abs(d[i+1]-d[p+1])+Math.abs(d[i+2]-d[p+2]);
+  }
+  const vSmooth = smooth(vSum);
+  const mv = sw/12|0;
+  let wxSum=0, wSum=0;
+  for(let x=mv;x<sw-mv;x++){ wxSum+=x*vSmooth[x]; wSum+=vSmooth[x]; }
+  const cxV = wSum>0 ? wxSum/wSum|0 : sw>>1;
+  const albumW = (bot-top)*1.02|0;
+  let left = Math.max(0, cxV - albumW/2|0);
+  let right = Math.min(sw-1, cxV + albumW/2|0);
+  const vMax = Math.max(...vSmooth.slice(mv,sw-mv));
+  const vThr = vMax * 0.22;
+  const vL = mv + vSmooth.slice(mv).findIndex(v=>v>vThr);
+  const vR = sw-mv - [...vSmooth.slice(mv,sw-mv)].reverse().findIndex(v=>v>vThr) - 1;
+  left = Math.max(left, vL - (sw/40|0));
+  right = Math.min(right, vR + (sw/40|0));
+
+  const pad = Math.max(4, Math.min(sw,sh)/50|0);
+  const ox=Math.round(Math.max(0,left-pad)/scale), oy=Math.round(Math.max(0,top-pad)/scale);
+  const ow=Math.min(Math.round((right-left+pad*2)/scale), W-ox);
+  const oh=Math.min(Math.round((bot-top+pad*2)/scale), H-oy);
+
+  const out = document.createElement("canvas");
+  const s2 = Math.min(1, targetPx/Math.max(ow,oh));
+  out.width = Math.round(ow*s2); out.height = Math.round(oh*s2);
+  out.getContext("2d").drawImage(bitmap, ox, oy, ow, oh, 0, 0, out.width, out.height);
+  return out.toDataURL("image/jpeg", 0.82);
+}
+
+async function prepareForAPI(file, maxW = 1024) {
+  let bitmap;
+  try { bitmap = await createImageBitmap(file); }
+  catch {
+    bitmap = await new Promise((res, rej) => {
+      const img = new Image();
+      const u = URL.createObjectURL(file);
+      const t = setTimeout(() => { URL.revokeObjectURL(u); rej(); }, 10000);
+      img.onload = () => { clearTimeout(t); URL.revokeObjectURL(u); res(img); };
+      img.onerror = () => { clearTimeout(t); URL.revokeObjectURL(u); rej(new Error("load")); };
+      img.src = u;
+    });
+  }
+  const { width: W, height: H } = bitmap;
+  const s = Math.min(1, maxW / Math.max(W, H));
+  const cv = document.createElement("canvas");
+  cv.width = Math.round(W*s); cv.height = Math.round(H*s);
+  cv.getContext("2d").drawImage(bitmap, 0, 0, cv.width, cv.height);
+  const b64 = cv.toDataURL("image/jpeg", 0.85).split(",")[1];
+  return { b64, type: "image/jpeg" };
+}
+
+async function callClaude(frontFile, backFile) {
+  const [front, back] = await Promise.all([prepareForAPI(frontFile), prepareForAPI(backFile)]);
+  const r = await fetch(API, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 1400,
+      messages: [{
+        role: "user",
+        content: [
+          { type: "image", source: { type: "base64", media_type: front.type, data: front.b64 } },
+          { type: "image", source: { type: "base64", media_type: back.type, data: back.b64 } },
+          { type: "text", text: `FRONT and BACK covers of a vinyl record. Return ONLY valid JSON, no markdown:
+{"artist":"string","album":"string","year":"string or null","genre":"string or null","label":"string or null","country":"string or null","tracks":[{"side":"A","number":1,"title":"string","duration":"3:45 or null"}],"notes":"string or null"}
+Include ALL tracks from the back cover.` }
+        ]
+      }]
+    })
+  });
+  if (!r.ok) {
+    const t = await r.text().catch(() => "");
+    throw new Error(`API error: ${r.status} — ${t.slice(0, 150)}`);
+  }
+  const d = await r.json();
+  const txt = d.content?.find(b => b.type === "text")?.text || "{}";
+  return JSON.parse(txt.replace(/```[a-z]*/gi, "").replace(/```/g, "").trim());
+}
+
+async function fetchPrice(artist, album, label, year) {
+  try {
+    const q = [artist, album, label, year].filter(Boolean).join(" ") + " vinyl price Discogs";
+    const r = await fetch(API, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 500,
+        tools: [{ type: "web_search_20250305", name: "web_search" }],
+        messages: [{
+          role: "user",
+          content: 'Find the vinyl record "' + album + '" by "' + artist + '"' +
+            (label ? ' label: ' + label : '') + (year ? ' ' + year : '') +
+            '. Search Discogs for current market price in USD. Return ONLY valid JSON: {"low":5,"median":15,"high":30,"currency":"USD","url":"https://discogs.com/..."}'
+        }]
+      })
+    });
+    if (!r.ok) return null;
+    const d = await r.json();
+    const txt = d.content?.filter(b => b.type === "text").map(b => b.text).join("") || "";
+    const match = txt.replace(/```[a-z]*/gi,"").replace(/```/g,"").match(/\{[^{}]+\}/);
+    if (!match) return null;
+    const p = JSON.parse(match[0]);
+    return (p.low && p.high) ? p : null;
+  } catch { return null; }
+}
+
+function exportToExcel(records) {
+  const rows = records.map(r => ({
+    "Исполнитель":   r.artist || "",
+    "Альбом":        r.album  || "",
+    "Год":           r.year   || "",
+    "Жанр":          r.genre  || "",
+    "Лейбл":         r.label  || "",
+    "Страна":        r.country || "",
+    "Состояние":     r.condition || "",
+    "Треков":        r.tracks?.length || 0,
+    "Цена мин ($)":  r.price?.low    || "",
+    "Медиана ($)":   r.price?.median || "",
+    "Цена макс ($)": r.price?.high   || "",
+    "Discogs":       r.price?.url    || "",
+  }));
+  const ws = XLSX.utils.json_to_sheet(rows);
+  const colWidths = [20,30,6,16,20,12,10,8,12,12,12,40];
+  ws["!cols"] = colWidths.map(w => ({ wch: w }));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Vinyl Catalog");
+  XLSX.writeFile(wb, "vinyl-catalog.xlsx");
+}
+
+
+function adjPrice(price, condition) {
+  if (!price) return null;
+  const mult = condFor(condition).mult;
+  return {
+    ...price,
+    low:    Math.round(price.low    * mult),
+    median: Math.round((price.low + price.high) / 2 * mult),
+    high:   Math.round(price.high   * mult),
+  };
+}
+
+// ── ConditionBadge ─────────────────────────────────────────────────────────
+function ConditionBadge({ condition, small }) {
+  if (!condition) return null;
+  const c = condFor(condition);
+  return (
+    <span style={{
+      background: c.bg, color: c.color, border: `1px solid ${c.color}44`,
+      borderRadius: 4, padding: small ? "1px 5px" : "2px 7px",
+      fontSize: small ? 9 : 10, fontWeight: "bold", letterSpacing: "0.05em",
+      flexShrink: 0,
+    }}>{c.label}</span>
+  );
+}
+
+// ── UploadZone ─────────────────────────────────────────────────────────────
+function UploadZone({ label, state, inputRef, onPick }) {
+  const [drag, setDrag] = useState(false);
+  return (
+    <div>
+      <div style={{ fontSize: 11, color: C.muted, marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.12em", fontWeight: "bold" }}>{label}</div>
+      <div
+        onClick={() => inputRef.current?.click()}
+        onDragOver={e => { e.preventDefault(); setDrag(true); }}
+        onDragLeave={() => setDrag(false)}
+        onDrop={e => { e.preventDefault(); setDrag(false); const f = e.dataTransfer.files[0]; if (f) onPick(f); }}
+        style={{ aspectRatio: "1", background: drag ? C.card : C.surface, border: `2px dashed ${state ? C.accent : drag ? "#d99232" : C.border}`, borderRadius: 12, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", cursor: "pointer", overflow: "hidden", position: "relative" }}>
+        {state?.preview ? (
+          <>
+            <img src={state.preview} alt={label} style={{ width: "100%", height: "100%", objectFit: "contain", background: "#0a0806" }} />
+            <div style={{ position: "absolute", bottom: 6, right: 6, background: "rgba(0,0,0,0.7)", borderRadius: 6, padding: "2px 7px", fontSize: 10, color: "#fff" }}>✓</div>
+          </>
+        ) : (
+          <>
+            <div style={{ fontSize: 32, color: C.faint, marginBottom: 6 }}>+</div>
+            <div style={{ fontSize: 12, color: C.muted, textAlign: "center", lineHeight: 1.5 }}>Нажмите или<br />перетащите</div>
+          </>
+        )}
+      </div>
+      <input ref={inputRef} type="file" accept="image/*" style={{ display: "none" }} onChange={e => { const f = e.target.files[0]; if (f) onPick(f); }} />
+    </div>
+  );
+}
+
+// ── FilterBar ──────────────────────────────────────────────────────────────
+function FilterBar({ records, filters, setFilters, sort, setSort }) {
+  const genres = [...new Set(records.map(r => r.genre).filter(Boolean))].sort();
+  const decades = [...new Set(records.map(r => r.year ? Math.floor(+r.year / 10) * 10 : null).filter(Boolean))].sort();
+
+  const toggle = (key, val) => setFilters(f => ({
+    ...f,
+    [key]: f[key].includes(val) ? f[key].filter(x => x !== val) : [...f[key], val]
+  }));
+
+  const chipStyle = (active) => ({
+    padding: "4px 10px", borderRadius: 12, fontSize: 11, cursor: "pointer",
+    border: `1px solid ${active ? C.accent : C.border}`,
+    background: active ? C.accent : "transparent",
+    color: active ? C.bg : C.muted, flexShrink: 0,
+  });
+
+  const hasActive = filters.genres.length || filters.decades.length || filters.condition;
+
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        {/* Sort */}
+        <select value={sort} onChange={e => setSort(e.target.value)}
+          style={{ padding: "4px 10px", background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, color: C.muted, fontSize: 11, cursor: "pointer", outline: "none" }}>
+          <option value="artist">А–Я</option>
+          <option value="date">По дате</option>
+          <option value="priceAsc">Цена ↑</option>
+          <option value="priceDesc">Цена ↓</option>
+        </select>
+
+        <div style={{ width: 1, height: 16, background: C.border }} />
+
+        {/* Genres */}
+        {genres.map(g => (
+          <button key={g} onClick={() => toggle("genres", g)} style={chipStyle(filters.genres.includes(g))}>{g}</button>
+        ))}
+
+        {/* Decades */}
+        {decades.map(d => (
+          <button key={d} onClick={() => toggle("decades", d)} style={chipStyle(filters.decades.includes(d))}>{d}е</button>
+        ))}
+
+        {/* Condition */}
+        {CONDITIONS.map(c => (
+          <button key={c.key} onClick={() => setFilters(f => ({ ...f, condition: f.condition === c.key ? null : c.key }))}
+            style={{ ...chipStyle(filters.condition === c.key), borderColor: filters.condition === c.key ? c.color : C.border, background: filters.condition === c.key ? c.bg : "transparent", color: filters.condition === c.key ? c.color : C.muted }}>
+            {c.label}
+          </button>
+        ))}
+
+        {hasActive && (
+          <button onClick={() => setFilters({ genres: [], decades: [], condition: null })}
+            style={{ padding: "4px 10px", borderRadius: 12, fontSize: 11, cursor: "pointer", border: `1px solid ${C.danger}`, background: "transparent", color: C.dangerText }}>
+            × Сбросить
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── CollectionValue ────────────────────────────────────────────────────────
+function CollectionValue({ records }) {
+  const priced = records.filter(r => r.price);
+  if (!priced.length) return null;
+  const adjList = priced.map(r => adjPrice(r.price, r.condition));
+  const low    = adjList.reduce((s, p) => s + p.low, 0);
+  const high   = adjList.reduce((s, p) => s + p.high, 0);
+  const median = Math.round((low + high) / 2);
+  const missing = records.length - priced.length;
+  return (
+    <div style={{ marginTop: 14, marginBottom: 14, padding: "14px 18px", background: "linear-gradient(135deg,#1e1a10 0%,#252018 100%)", border: `1px solid #4a3a1a`, borderRadius: 12, position: "relative", overflow: "hidden" }}>
+      <div style={{ position: "absolute", right: 16, top: "50%", transform: "translateY(-50%)", fontSize: 50, opacity: 0.06 }}>♪</div>
+      <div style={{ fontSize: 9, color: "#8a7454", textTransform: "uppercase", letterSpacing: "0.14em", marginBottom: 7 }}>Оценочная стоимость коллекции</div>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 6 }}>
+        <span style={{ fontSize: 28, fontWeight: "bold", color: "#7ab870" }}>${low.toLocaleString()}–${high.toLocaleString()}</span>
+        <span style={{ fontSize: 11, color: "#8a7454" }}>USD</span>
+      </div>
+      <div style={{ fontSize: 10, color: "#8a7454" }}>
+        Медиана: <span style={{ color: "#f0e2c0", fontWeight: "bold" }}>${median.toLocaleString()}</span>
+        {" · "}оценено {priced.length} из {records.length}
+        {missing > 0 && <span style={{ color: "#6a5a44" }}> ({missing} без цены)</span>}
+      </div>
+      <div style={{ fontSize: 9, color: "#5a4a34", marginTop: 4 }}>По данным Discogs · с учётом состояния · цены ориентировочные</div>
+    </div>
+  );
+}
+
+// ── AlbumCard ──────────────────────────────────────────────────────────────
+function AlbumCard({ record, onClick }) {
+  const [hov, setHov] = useState(false);
+  const p = record.price ? adjPrice(record.price, record.condition) : null;
+  return (
+    <div onClick={() => onClick(record)} onMouseEnter={() => setHov(true)} onMouseLeave={() => setHov(false)}
+      style={{ background: hov ? C.cardHover : C.card, border: `1px solid ${hov ? C.accent : C.border}`, borderRadius: 10, overflow: "hidden", cursor: "pointer", transition: "all 0.15s", transform: hov ? "translateY(-2px)" : "none" }}>
+      <div style={{ aspectRatio: "1", background: C.surface, overflow: "hidden", position: "relative" }}>
+        {(record.thumb || record.thumbFront)
+          ? <img src={record.thumb || record.thumbFront} alt={record.album} style={{ width: "100%", height: "100%", objectFit: "contain", background: "#0a0806" }} />
+          : <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 40, color: C.faint }}>♪</div>}
+        {record.condition && <div style={{ position: "absolute", top: 5, right: 5 }}><ConditionBadge condition={record.condition} small /></div>}
+      </div>
+      <div style={{ padding: "10px 11px 12px" }}>
+        <div style={{ fontSize: 13, fontWeight: "bold", color: C.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{record.album}</div>
+        <div style={{ fontSize: 11, color: C.accent, marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{record.artist}</div>
+        <div style={{ fontSize: 10, color: C.muted, marginTop: 4 }}>{[record.year, record.genre].filter(Boolean).join(" · ") || "\u00A0"}</div>
+        {p && <div style={{ marginTop: 5, fontSize: 11, fontWeight: "bold", color: "#6dbf6d" }}>${p.low}–${p.high}</div>}
+      </div>
+    </div>
+  );
+}
+
+// ── TrackList ──────────────────────────────────────────────────────────────
+function TrackList({ tracks }) {
+  if (!tracks?.length) return <div style={{ color: C.muted, fontSize: 13, fontStyle: "italic" }}>Треки не распознаны</div>;
+  const sides = [...new Set(tracks.map(t => t.side).filter(Boolean))];
+  const renderTrack = (t, i) => (
+    <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderBottom: `1px solid ${C.faint}`, fontSize: 13 }}>
+      <div style={{ display: "flex", gap: 14 }}>
+        <span style={{ color: C.muted, minWidth: 18, textAlign: "right" }}>{t.number || i+1}</span>
+        <span style={{ color: C.text }}>{t.title}</span>
+      </div>
+      {t.duration && <span style={{ color: C.muted, marginLeft: 10, fontSize: 12, flexShrink: 0 }}>{t.duration}</span>}
+    </div>
+  );
+  if (sides.length > 0) return (
+    <div>{sides.map(side => (
+      <div key={side} style={{ marginBottom: 18 }}>
+        <div style={{ fontSize: 10, color: C.accent, fontWeight: "bold", letterSpacing: "0.15em", textTransform: "uppercase", marginBottom: 6, paddingBottom: 6, borderBottom: `1px solid ${C.border}` }}>
+          Сторона {side} · {tracks.filter(t => t.side === side).length} трека
+        </div>
+        {tracks.filter(t => t.side === side).map(renderTrack)}
+      </div>
+    ))}</div>
+  );
+  return <div>{tracks.map(renderTrack)}</div>;
+}
+
+// ── PriceBlock ─────────────────────────────────────────────────────────────
+function PriceBlock({ record, onUpdate }) {
+  const [loading, setLoading] = useState(false);
+  const p = record.price ? adjPrice(record.price, record.condition) : null;
+
+  const refresh = async () => {
+    setLoading(true);
+    const price = await fetchPrice(record.artist, record.album, record.label, record.year);
+    if (price && onUpdate) onUpdate({ ...record, price });
+    setLoading(false);
+  };
+
+  if (!p) return (
+    <div style={{ marginBottom: 18 }}>
+      <button onClick={refresh} disabled={loading}
+        style={{ padding: "8px 16px", background: "transparent", border: `1px solid ${C.border}`, color: loading ? C.muted : C.accent, borderRadius: 6, cursor: loading ? "not-allowed" : "pointer", fontFamily: "inherit", fontSize: 12 }}>
+        {loading ? "Ищу цену..." : "♪ Найти цену на Discogs"}
+      </button>
+    </div>
+  );
+
+  return (
+    <div style={{ marginBottom: 18, padding: "12px 14px", background: C.card, borderRadius: 8, border: `1px solid ${C.border}` }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+        <div style={{ fontSize: 10, color: C.muted, textTransform: "uppercase", letterSpacing: "0.12em" }}>Примерная стоимость · Discogs</div>
+        <button onClick={refresh} disabled={loading} style={{ background: "none", border: "none", color: C.muted, cursor: "pointer", fontSize: 13, padding: 0 }}>{loading ? "…" : "↻"}</button>
+      </div>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+        <span style={{ fontSize: 22, fontWeight: "bold", color: "#7ab870" }}>${p.low}–${p.high}</span>
+        <span style={{ fontSize: 11, color: C.muted }}>USD</span>
+        {record.condition && <ConditionBadge condition={record.condition} small />}
+      </div>
+      {record.price.note && <div style={{ fontSize: 11, color: C.muted, marginTop: 5 }}>{record.price.note}</div>}
+      {record.price.url && <a href={record.price.url} style={{ fontSize: 11, color: C.accent, textDecoration: "none", marginTop: 4, display: "inline-block" }}>Открыть на Discogs →</a>}
+    </div>
+  );
+}
+
+// ── Lightbox ───────────────────────────────────────────────────────────────
+function Lightbox({ images, startIndex, onClose }) {
+  const [idx, setIdx] = useState(startIndex || 0);
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.92)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <button onClick={onClose} style={{ position: "fixed", top: 16, right: 20, background: "none", border: "none", color: "#fff", fontSize: 28, cursor: "pointer", zIndex: 1001, lineHeight: 1 }}>×</button>
+      {images.length > 1 && idx > 0 && (
+        <button onClick={e => { e.stopPropagation(); setIdx(i => i-1); }}
+          style={{ position: "fixed", left: 16, top: "50%", transform: "translateY(-50%)", background: "rgba(255,255,255,0.1)", border: "none", color: "#fff", fontSize: 24, cursor: "pointer", borderRadius: 6, padding: "8px 14px", zIndex: 1001 }}>‹</button>
+      )}
+      <img onClick={e => e.stopPropagation()} src={images[idx]} alt="cover"
+        style={{ maxWidth: "90vw", maxHeight: "90vh", objectFit: "contain", borderRadius: 4 }} />
+      {images.length > 1 && idx < images.length-1 && (
+        <button onClick={e => { e.stopPropagation(); setIdx(i => i+1); }}
+          style={{ position: "fixed", right: 16, top: "50%", transform: "translateY(-50%)", background: "rgba(255,255,255,0.1)", border: "none", color: "#fff", fontSize: 24, cursor: "pointer", borderRadius: 6, padding: "8px 14px", zIndex: 1001 }}>›</button>
+      )}
+      {images.length > 1 && (
+        <div style={{ position: "fixed", bottom: 20, left: "50%", transform: "translateX(-50%)", display: "flex", gap: 6 }}>
+          {images.map((_, i) => <div key={i} onClick={e => { e.stopPropagation(); setIdx(i); }} style={{ width: 8, height: 8, borderRadius: "50%", background: i === idx ? "#fff" : "rgba(255,255,255,0.3)", cursor: "pointer" }} />)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── DetailView ─────────────────────────────────────────────────────────────
+function DetailView({ record, onBack, onDelete, onUpdate }) {
+  const [lightbox, setLightbox] = useState(null);
+  const [reshooting, setReshooting] = useState(false);
+  const [newFront, setNewFront] = useState(null);
+  const [newBack, setNewBack]   = useState(null);
+  const [reprocessing, setReprocessing] = useState(false);
+  const frontRef = useRef(); const backRef = useRef();
+
+  const images = [record.thumbFront||record.thumb, record.thumbBack].filter(Boolean);
+  const [coverIdx, setCoverIdx] = useState(0);
+
+  const setCondition = (key) => {
+    const updated = { ...record, condition: record.condition === key ? null : key };
+    onUpdate(updated);
+  };
+
+  const pickReshoot = (file, side) => {
+    if (!file?.type.startsWith("image/")) return;
+    const preview = URL.createObjectURL(file);
+    if (side === "front") setNewFront({ file, preview });
+    else setNewBack({ file, preview });
+  };
+
+  const applyReshoot = async () => {
+    if (!newFront && !newBack) return;
+    setReprocessing(true);
+    try {
+      const updated = { ...record };
+      if (newFront) {
+        const t = await smartCropToB64(newFront.file);
+        updated.thumbFront = t; updated.thumb = t;
+        URL.revokeObjectURL(newFront.preview);
+      }
+      if (newBack) {
+        const t = await smartCropToB64(newBack.file);
+        updated.thumbBack = t;
+        URL.revokeObjectURL(newBack.preview);
+      }
+      onUpdate(updated);
+      setNewFront(null); setNewBack(null); setReshooting(false);
+    } catch {}
+    setReprocessing(false);
+  };
+
+  return (
+    <div>
+      {lightbox !== null && <Lightbox images={images} startIndex={lightbox} onClose={() => setLightbox(null)} />}
+      <button onClick={onBack} style={{ marginBottom: 20, padding: "7px 16px", background: "transparent", border: `1px solid ${C.border}`, color: C.muted, borderRadius: 6, cursor: "pointer", fontFamily: "inherit", fontSize: 13 }}>← Назад</button>
+      <div style={{ display: "grid", gridTemplateColumns: "240px 1fr", gap: 28, alignItems: "start" }}>
+        {/* Cover */}
+        <div>
+          {images.length > 1 && (
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
+              {images.map((img, i) => (
+                <div key={i} onClick={() => setCoverIdx(i)}
+                  style={{ borderRadius: 8, overflow: "hidden", border: `2px solid ${coverIdx===i ? C.accent : C.border}`, cursor: "pointer", aspectRatio: "1", background: C.surface }}>
+                  <img src={img} style={{ width: "100%", height: "100%", objectFit: "contain", background: "#0a0806" }} />
+                </div>
+              ))}
+            </div>
+          )}
+          <div onClick={() => setLightbox(coverIdx)} style={{ borderRadius: 10, overflow: "hidden", border: `1px solid ${C.border}`, background: C.surface, cursor: "zoom-in" }}>
+            <img src={images[coverIdx] || images[0]} style={{ width: "100%", objectFit: "contain", background: "#0a0806", display: "block" }} />
+          </div>
+          <div style={{ marginTop: 10, fontSize: 10, color: C.muted, textAlign: "center" }}>Нажмите для полноэкранного просмотра</div>
+
+          {/* Buttons */}
+          <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
+            <button onClick={() => setReshooting(!reshooting)}
+              style={{ flex: 1, padding: "7px", background: "transparent", border: `1px solid ${C.border}`, color: C.muted, borderRadius: 6, cursor: "pointer", fontFamily: "inherit", fontSize: 11 }}>
+              ↺ Переснять
+            </button>
+            <button onClick={() => onDelete(record)}
+              style={{ flex: 1, padding: "7px", background: "transparent", border: `1px solid ${C.danger}`, color: C.dangerText, borderRadius: 6, cursor: "pointer", fontFamily: "inherit", fontSize: 11 }}>
+              Удалить
+            </button>
+          </div>
+
+          {/* Reshoot panel */}
+          {reshooting && (
+            <div style={{ marginTop: 10, padding: "12px", background: C.card, borderRadius: 8, border: `1px solid ${C.border}` }}>
+              <div style={{ fontSize: 11, color: C.muted, marginBottom: 10 }}>Загрузите новые фото:</div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 10 }}>
+                <UploadZone label="Перед" state={newFront} inputRef={frontRef} onPick={f => pickReshoot(f, "front")} />
+                <UploadZone label="Зад"   state={newBack}  inputRef={backRef}  onPick={f => pickReshoot(f, "back")} />
+              </div>
+              <button onClick={applyReshoot} disabled={(!newFront && !newBack) || reprocessing}
+                style={{ width: "100%", padding: "8px", background: (newFront||newBack)&&!reprocessing ? C.accent : C.border, color: (newFront||newBack)&&!reprocessing ? C.bg : C.muted, border: "none", borderRadius: 6, cursor: "pointer", fontFamily: "inherit", fontSize: 12, fontWeight: "bold" }}>
+                {reprocessing ? "Обрабатываю..." : "Сохранить фото"}
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* Info */}
+        <div>
+          <div style={{ fontSize: 24, fontWeight: "bold", color: C.text, lineHeight: 1.25, marginBottom: 6 }}>{record.album}</div>
+          <div style={{ fontSize: 17, color: C.accent, marginBottom: 12 }}>{record.artist}</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 14 }}>
+            {[record.year, record.genre, record.label, record.country].filter(Boolean).map((v,i) => (
+              <span key={i} style={{ background: C.faint, border: `1px solid ${C.border}`, borderRadius: 12, padding: "3px 10px", fontSize: 11, color: C.muted }}>{v}</span>
+            ))}
+          </div>
+
+          {/* Condition */}
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ fontSize: 10, color: C.muted, textTransform: "uppercase", letterSpacing: "0.12em", marginBottom: 7 }}>Состояние</div>
+            <div style={{ display: "flex", gap: 6 }}>
+              {CONDITIONS.map(c => (
+                <button key={c.key} onClick={() => setCondition(c.key)}
+                  style={{ padding: "5px 12px", borderRadius: 6, fontSize: 11, cursor: "pointer", fontFamily: "inherit",
+                    border: `1px solid ${record.condition === c.key ? c.color : C.border}`,
+                    background: record.condition === c.key ? c.bg : "transparent",
+                    color: record.condition === c.key ? c.color : C.muted,
+                    fontWeight: record.condition === c.key ? "bold" : "normal" }}>
+                  {c.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <PriceBlock record={record} onUpdate={onUpdate} />
+
+          <div style={{ fontSize: 11, color: C.muted, textTransform: "uppercase", letterSpacing: "0.12em", fontWeight: "bold", marginBottom: 12 }}>
+            Треклист · {record.tracks?.length || 0} треков
+          </div>
+          <TrackList tracks={record.tracks} />
+          {record.notes && (
+            <div style={{ marginTop: 18, padding: "10px 14px", background: C.card, borderRadius: 8, fontSize: 12, color: C.muted, fontStyle: "italic", borderLeft: `3px solid ${C.accent}` }}>
+              {record.notes}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── StatsView ──────────────────────────────────────────────────────────────
+
+function ExportButtons({ records }) {
+  const [pdfStatus, setPdfStatus] = useState(null);
+  const isLoading = pdfStatus && !pdfStatus.startsWith("error:");
+  const isError   = pdfStatus?.startsWith("error:");
+  const errMsg    = isError ? pdfStatus.replace("error:", "") : null;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4, alignItems: "flex-end" }}>
+      <div style={{ display: "flex", gap: 8 }}>
+        <button onClick={() => exportToExcel(records)}
+          style={{ padding: "7px 14px", background: "transparent", border: `1px solid ${C.border}`, color: C.muted, borderRadius: 6, cursor: "pointer", fontFamily: "inherit", fontSize: 12, whiteSpace: "nowrap" }}>
+          ↓ Excel
+        </button>
+        <button onClick={() => !isLoading && exportToPDF(records, setPdfStatus)}
+          disabled={isLoading}
+          style={{ padding: "7px 14px", background: "transparent", border: `1px solid ${isLoading ? C.faint : C.border}`, color: isLoading ? C.faint : C.muted, borderRadius: 6, cursor: isLoading ? "not-allowed" : "pointer", fontFamily: "inherit", fontSize: 12, whiteSpace: "nowrap" }}>
+          {isLoading ? pdfStatus : "↓ PDF"}
+        </button>
+      </div>
+      {isError && (
+        <div style={{ fontSize: 10, color: "#e06060", maxWidth: 200, textAlign: "right" }}>
+          Ошибка PDF: {errMsg}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StatsView({ records }) {
+  const genres = {};
+  const decades = {};
+  records.forEach(r => {
+    if (r.genre) genres[r.genre] = (genres[r.genre] || 0) + 1;
+    if (r.year) { const d = Math.floor(+r.year/10)*10; decades[d] = (decades[d]||0)+1; }
+  });
+  const topGenres = Object.entries(genres).sort((a,b) => b[1]-a[1]).slice(0,8);
+  const sortedDecades = Object.entries(decades).sort((a,b) => +a[0]-+b[0]);
+  const maxG = Math.max(...topGenres.map(x=>x[1]), 1);
+  const maxD = Math.max(...sortedDecades.map(x=>x[1]), 1);
+  const topPriced = [...records].filter(r=>r.price).sort((a,b) => (b.price.high+b.price.low)-(a.price.high+a.price.low)).slice(0,5);
+  const totalTracks = records.reduce((s,r) => s+(r.tracks?.length||0), 0);
+  const priced = records.filter(r=>r.price);
+
+  const barStyle = (val, max, color) => ({
+    height: 8, borderRadius: 4, background: color || C.accent,
+    width: `${Math.round(val/max*100)}%`, minWidth: 4, transition: "width 0.3s",
+  });
+
+  return (
+    <div style={{ padding: 24 }}>
+      {/* Summary */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(120px,1fr))", gap: 10, marginBottom: 28 }}>
+        {[
+          ["Альбомов", records.length, C.accent],
+          ["Треков", totalTracks, "#7ab870"],
+          ["Исполнителей", new Set(records.map(r=>r.artist)).size, "#4a9aaa"],
+          ["Жанров", Object.keys(genres).length, "#c8a030"],
+          ["С ценой", priced.length, "#7ab870"],
+        ].map(([label, val, color]) => (
+          <div key={label} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 8, padding: "12px 16px", textAlign: "center" }}>
+            <div style={{ fontSize: 26, fontWeight: "bold", color, lineHeight: 1 }}>{val}</div>
+            <div style={{ fontSize: 11, color: C.muted, marginTop: 4 }}>{label}</div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20, marginBottom: 20 }}>
+        {/* Genres */}
+        <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, padding: "16px 18px" }}>
+          <div style={{ fontSize: 11, color: C.muted, textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 14 }}>Жанры</div>
+          {topGenres.length === 0 ? <div style={{ color: C.muted, fontSize: 12 }}>Нет данных</div> :
+            topGenres.map(([g, n]) => (
+              <div key={g} style={{ marginBottom: 10 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 4 }}>
+                  <span style={{ color: C.text }}>{g}</span>
+                  <span style={{ color: C.muted }}>{n}</span>
+                </div>
+                <div style={{ height: 8, background: C.faint, borderRadius: 4 }}>
+                  <div style={barStyle(n, maxG, C.accent)} />
+                </div>
+              </div>
+            ))
+          }
+        </div>
+
+        {/* Decades */}
+        <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, padding: "16px 18px" }}>
+          <div style={{ fontSize: 11, color: C.muted, textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 14 }}>По десятилетиям</div>
+          {sortedDecades.length === 0 ? <div style={{ color: C.muted, fontSize: 12 }}>Нет данных</div> :
+            sortedDecades.map(([d, n]) => (
+              <div key={d} style={{ marginBottom: 10 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 4 }}>
+                  <span style={{ color: C.text }}>{d}е</span>
+                  <span style={{ color: C.muted }}>{n}</span>
+                </div>
+                <div style={{ height: 8, background: C.faint, borderRadius: 4 }}>
+                  <div style={barStyle(n, maxD, "#4a9aaa")} />
+                </div>
+              </div>
+            ))
+          }
+        </div>
+      </div>
+
+      {/* Top by price */}
+      {topPriced.length > 0 && (
+        <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, padding: "16px 18px", marginBottom: 20 }}>
+          <div style={{ fontSize: 11, color: C.muted, textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 14 }}>Самые ценные</div>
+          {topPriced.map((r, i) => {
+            const p = adjPrice(r.price, r.condition);
+            return (
+              <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 12, paddingBottom: 10, marginBottom: 10, borderBottom: i < topPriced.length-1 ? `1px solid ${C.faint}` : "none" }}>
+                <div style={{ fontSize: 18, fontWeight: "bold", color: C.faint, minWidth: 20 }}>{i+1}</div>
+                {(r.thumbFront||r.thumb) && <img src={r.thumbFront||r.thumb} style={{ width: 36, height: 36, objectFit: "cover", borderRadius: 4, flexShrink: 0 }} />}
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, color: C.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.album}</div>
+                  <div style={{ fontSize: 11, color: C.muted }}>{r.artist}</div>
+                </div>
+                <div style={{ fontSize: 13, fontWeight: "bold", color: "#7ab870", flexShrink: 0 }}>${p.low}–${p.high}</div>
+                {r.condition && <ConditionBadge condition={r.condition} small />}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Export */}
+      <div style={{ display: "flex", gap: 10 }}>
+        <button onClick={() => exportToExcel(records)}
+          style={{ flex: 1, padding: "12px", background: C.surface, border: `1px solid ${C.border}`, color: C.text, borderRadius: 8, cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: "bold" }}>
+          ↓ Excel (.xlsx)
+        </button>
+        <button onClick={() => exportToPDF(records, () => {})}
+          style={{ flex: 1, padding: "12px", background: C.surface, border: `1px solid ${C.border}`, color: C.text, borderRadius: 8, cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: "bold" }}>
+          ↓ PDF (с фото)
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── AddView ────────────────────────────────────────────────────────────────
+function AddView({ onAdded }) {
+  const [mode, setMode]       = useState("single"); // "single" | "batch"
+
+  // ── Single mode state ────────────────────────────────────────────────
+  const [front, setFront]     = useState(null);
+  const [back,  setBack]      = useState(null);
+  const [busy,  setBusy]      = useState(false);
+  const [step,  setStep]      = useState("");
+  const [err,   setErr]       = useState("");
+  const frontRef = useRef(); const backRef = useRef();
+
+  // ── Batch mode state ─────────────────────────────────────────────────
+  const [pairs,    setPairs]    = useState([]); // [{front, back, frontPrev, backPrev}]
+  const [batchRun, setBatchRun] = useState(false);
+  const [batchIdx, setBatchIdx] = useState(0);
+  const [batchDone,setBatchDone]= useState([]);  // completed results
+  const [batchErr, setBatchErr] = useState([]);
+  const batchRef = useRef();
+
+  // ── Single helpers ───────────────────────────────────────────────────
+  const pickFile = (file, side) => {
+    if (!file?.type.startsWith("image/")) return;
+    const reader = new FileReader();
+    reader.onload = e => {
+      const preview = e.target.result;
+      if (side === "front") setFront({ file, preview });
+      else                  setBack({ file, preview });
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const analyzeSingle = async () => {
+    if (!front || !back || busy) return;
+    setBusy(true); setErr("");
+    try {
+      setStep("Обрезаю обложки...");
+      const [thumbFront, thumbBack] = await Promise.all([smartCropToB64(front.file), smartCropToB64(back.file)]);
+      setStep("ИИ читает пластинку...");
+      const info = await callClaude(front.file, back.file);
+      setStep("Ищу цену на Discogs...");
+      const price = await fetchPrice(info.artist||"", info.album||"", info.label||null, info.year||null);
+      setStep("Сохраняю...");
+      const id = `vin:${Date.now()}`;
+      const rec = {
+        id, thumbFront, thumbBack, thumb: thumbFront,
+        artist: info.artist||"Неизвестный", album: info.album||"Без названия",
+        year: info.year||null, genre: info.genre||null, label: info.label||null,
+        country: info.country||null, tracks: Array.isArray(info.tracks)?info.tracks:[],
+        notes: info.notes||null, at: new Date().toISOString(),
+        ...(price ? { price } : {}),
+      };
+      await dbSave(rec).catch(() => window.storage.set(id, JSON.stringify(rec)));
+      setFront(null); setBack(null);
+      onAdded(rec);
+    } catch (e) { setErr("Ошибка: " + (e.message||"что-то пошло не так")); }
+    setBusy(false); setStep("");
+  };
+
+  // ── Batch helpers ────────────────────────────────────────────────────
+  const handleBatchFiles = async (files) => {
+    const sorted = [...files].sort((a, b) => a.name.localeCompare(b.name));
+
+    const toPreview = (file) => new Promise(res => {
+      const reader = new FileReader();
+      reader.onload = e => res(e.target.result);
+      reader.onerror = () => res(null);
+      reader.readAsDataURL(file);
+    });
+
+    const newPairs = [];
+    for (let i = 0; i + 1 < sorted.length; i += 2) {
+      const [fp, bp] = await Promise.all([toPreview(sorted[i]), toPreview(sorted[i+1])]);
+      newPairs.push({ front: sorted[i], back: sorted[i+1], frontPrev: fp, backPrev: bp });
+    }
+    if (sorted.length % 2 !== 0) {
+      const last = sorted[sorted.length - 1];
+      const fp = await toPreview(last);
+      newPairs.push({ front: last, back: null, frontPrev: fp, backPrev: null });
+    }
+    setPairs(newPairs);
+    setBatchDone([]); setBatchErr([]); setBatchRun(false); setBatchIdx(0);
+  };
+
+  const swapPair = (i) => {
+    setPairs(p => {
+      const updated = [...p];
+      updated[i] = { ...updated[i], front: updated[i].back, back: updated[i].front, frontPrev: updated[i].backPrev, backPrev: updated[i].frontPrev };
+      return updated;
+    });
+  };
+
+  const removePair = (i) => {
+    setPairs(p => {
+      const updated = p.filter((_, idx) => idx !== i);
+      return updated;
+    });
+  };
+
+  const runBatch = async () => {
+    if (!pairs.length || batchRun) return;
+    setBatchRun(true);
+    const done = []; const errs = [];
+    for (let i = 0; i < pairs.length; i++) {
+      setBatchIdx(i);
+      const pair = pairs[i];
+      if (!pair.back) { errs.push({ i, msg: "Нет задней стороны" }); continue; }
+      try {
+        const [thumbFront, thumbBack] = await Promise.all([
+          smartCropToB64(pair.front),
+          smartCropToB64(pair.back),
+        ]);
+        const info  = await callClaude(pair.front, pair.back);
+        const price = await fetchPrice(info.artist||"", info.album||"", info.label||null, info.year||null);
+        const id  = `vin:${Date.now()}_${i}`;
+        const rec = {
+          id, thumbFront, thumbBack, thumb: thumbFront,
+          artist: info.artist||"Неизвестный", album: info.album||"Без названия",
+          year: info.year||null, genre: info.genre||null, label: info.label||null,
+          country: info.country||null, tracks: Array.isArray(info.tracks)?info.tracks:[],
+          notes: info.notes||null, at: new Date().toISOString(),
+          ...(price ? { price } : {}),
+        };
+        await dbSave(rec).catch(() => window.storage.set(id, JSON.stringify(rec)));
+        onAdded(rec);
+        done.push(rec);
+      } catch (e) {
+        errs.push({ i, msg: e.message || "ошибка" });
+      }
+      setBatchDone([...done]); setBatchErr([...errs]);
+    }
+    setBatchRun(false);
+    setBatchIdx(-1);
+  };
+
+  const resetBatch = () => {
+    setPairs([]); setBatchDone([]); setBatchErr([]); setBatchRun(false); setBatchIdx(0);
+  };
+
+  const batchFinished = !batchRun && batchIdx === -1 && (batchDone.length + batchErr.length) === pairs.length && pairs.length > 0;
+
+  // ── Render ────────────────────────────────────────────────────────────
+  return (
+    <div style={{ maxWidth: 640, margin: "0 auto", padding: "28px 24px" }}>
+      <div style={{ marginBottom: 20 }}>
+        <div style={{ fontSize: 22, fontWeight: "bold", marginBottom: 6 }}>Добавить альбом</div>
+        {/* Mode toggle */}
+        <div style={{ display: "flex", gap: 0, border: `1px solid ${C.border}`, borderRadius: 8, overflow: "hidden", width: "fit-content", marginTop: 10 }}>
+          {[["single","Один альбом"],["batch","Несколько альбомов"]].map(([m, label]) => (
+            <button key={m} onClick={() => setMode(m)}
+              style={{ padding: "7px 18px", background: mode===m ? C.accent : "transparent", color: mode===m ? C.bg : C.muted, border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 12, fontWeight: mode===m ? "bold" : "normal" }}>
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* ── Single mode ── */}
+      {mode === "single" && (
+        <>
+          <div style={{ fontSize: 13, color: C.muted, marginBottom: 16, lineHeight: 1.6 }}>
+            Загрузите фото лицевой и задней стороны.<br />Фон обрежется автоматически, ИИ распознает треки.
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 20 }}>
+            <UploadZone label="Лицевая сторона" state={front} inputRef={frontRef} onPick={f => pickFile(f,"front")} />
+            <UploadZone label="Задняя сторона"  state={back}  inputRef={backRef}  onPick={f => pickFile(f,"back")} />
+          </div>
+          {err && <div style={{ background:"#200e0e", border:`1px solid ${C.danger}`, borderRadius:8, padding:"10px 14px", color:C.dangerText, fontSize:13, marginBottom:16 }}>{err}</div>}
+          <button onClick={analyzeSingle} disabled={!front||!back||busy}
+            style={{ width:"100%", padding:"13px", background:(front&&back&&!busy)?C.accent:C.border, color:(front&&back&&!busy)?C.bg:C.muted, border:"none", borderRadius:8, fontSize:15, fontFamily:"inherit", fontWeight:"bold", cursor:(front&&back&&!busy)?"pointer":"not-allowed" }}>
+            {busy ? (step||"Обрабатываю...") : "♪ Анализировать и добавить"}
+          </button>
+        </>
+      )}
+
+      {/* ── Batch mode ── */}
+      {mode === "batch" && (
+        <>
+          {pairs.length === 0 ? (
+            <>
+              <div style={{ fontSize: 13, color: C.muted, marginBottom: 16, lineHeight: 1.6 }}>
+                Выберите сразу все фото. Файлы будут отсортированы по имени и разбиты на пары:<br />
+                <strong style={{ color: C.text }}>1-е фото = лицевая, 2-е = задняя, 3-е = лицевая, 4-е = задняя...</strong>
+              </div>
+              <div
+                onClick={() => batchRef.current?.click()}
+                onDragOver={e => e.preventDefault()}
+                onDrop={e => { e.preventDefault(); handleBatchFiles(e.dataTransfer.files); }}
+                style={{ border: `2px dashed ${C.accent}`, borderRadius: 12, padding: "48px 24px", textAlign: "center", cursor: "pointer", background: C.surface }}>
+                <div style={{ fontSize: 36, color: C.faint, marginBottom: 12 }}>+</div>
+                <div style={{ fontSize: 14, color: C.text, marginBottom: 6 }}>Нажмите или перетащите фото</div>
+                <div style={{ fontSize: 11, color: C.muted }}>Выберите чётное количество файлов (пары лицевая + задняя)</div>
+              </div>
+              <input ref={batchRef} type="file" accept="image/*" multiple style={{ display: "none" }}
+                onChange={e => handleBatchFiles(e.target.files)} />
+            </>
+          ) : (
+            <>
+              {/* Pairs preview */}
+              {!batchFinished && (
+                <>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+                    <div style={{ fontSize: 13, color: C.muted }}>
+                      {pairs.length} {pairs.length===1?"пара":"пар"} · {pairs.length*2} фото
+                    </div>
+                    <button onClick={resetBatch} style={{ fontSize: 11, color: C.muted, background: "none", border: `1px solid ${C.border}`, borderRadius: 6, padding: "4px 10px", cursor: "pointer", fontFamily: "inherit" }}>
+                      × Сбросить
+                    </button>
+                  </div>
+
+                  {/* Pairs grid */}
+                  <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 20 }}>
+                    {pairs.map((pair, i) => {
+                      const isDone   = batchDone.length > i && batchRun === false && batchIdx === -1;
+                      const isActive = batchRun && batchIdx === i;
+                      const isErr    = batchErr.find(e => e.i === i);
+                      const isDoneRec= batchDone.find((_, di) => {
+                        const doneIs = pairs.slice(0, i+1).filter((_, pi) => !batchErr.find(e=>e.i===pi)).length - 1;
+                        return di === doneIs;
+                      });
+
+                      return (
+                        <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 12px", background: isActive ? "#1e1a0e" : C.card, border: `1px solid ${isActive ? C.accent : isErr ? C.danger : C.border}`, borderRadius: 10 }}>
+                          <div style={{ fontSize: 12, color: C.muted, minWidth: 20, textAlign: "center", fontWeight: "bold" }}>{i+1}</div>
+                          {/* Front */}
+                          <div style={{ flex: 1, textAlign: "center" }}>
+                            <div style={{ fontSize: 9, color: C.muted, marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.1em" }}>Лицевая</div>
+                            {pair.frontPrev
+                              ? <img src={pair.frontPrev} style={{ width: 60, height: 60, objectFit: "cover", borderRadius: 5, border: `1px solid ${C.border}` }} />
+                              : <div style={{ width: 60, height: 60, background: C.faint, borderRadius: 5, display: "inline-flex", alignItems: "center", justifyContent: "center", color: C.muted, fontSize: 10 }}>—</div>
+                            }
+                            <div style={{ fontSize: 9, color: C.faint, marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 80 }}>{pair.front?.name}</div>
+                          </div>
+                          {/* Swap button */}
+                          {!batchRun && (
+                            <button onClick={() => swapPair(i)} title="Поменять стороны"
+                              style={{ background: "none", border: `1px solid ${C.border}`, color: C.muted, borderRadius: 6, padding: "4px 8px", cursor: "pointer", fontSize: 14 }}>
+                              ⇄
+                            </button>
+                          )}
+                          {/* Back */}
+                          <div style={{ flex: 1, textAlign: "center" }}>
+                            <div style={{ fontSize: 9, color: C.muted, marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.1em" }}>Задняя</div>
+                            {pair.backPrev
+                              ? <img src={pair.backPrev} style={{ width: 60, height: 60, objectFit: "cover", borderRadius: 5, border: `1px solid ${C.border}` }} />
+                              : <div style={{ width: 60, height: 60, background: C.faint, borderRadius: 5, display: "inline-flex", alignItems: "center", justifyContent: "center", color: C.muted, fontSize: 10 }}>—</div>
+                            }
+                            <div style={{ fontSize: 9, color: C.faint, marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 80 }}>{pair.back?.name}</div>
+                          </div>
+                          {/* Status */}
+                          <div style={{ minWidth: 24, textAlign: "center" }}>
+                            {isActive && <div style={{ fontSize: 16, color: C.accent }}>⟳</div>}
+                            {isErr    && <div style={{ fontSize: 14, color: C.dangerText }}>✕</div>}
+                            {!isActive && !isErr && batchIdx > i && <div style={{ fontSize: 14, color: "#5aaa5a" }}>✓</div>}
+                          </div>
+                          {/* Remove */}
+                          {!batchRun && (
+                            <button onClick={() => removePair(i)}
+                              style={{ background: "none", border: "none", color: C.faint, cursor: "pointer", fontSize: 16, padding: "0 2px" }}>
+                              ×
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* Progress bar */}
+                  {batchRun && (
+                    <div style={{ marginBottom: 16 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: C.muted, marginBottom: 6 }}>
+                        <span>Обрабатываю альбом {batchIdx + 1} из {pairs.length}...</span>
+                        <span>{Math.round((batchIdx / pairs.length) * 100)}%</span>
+                      </div>
+                      <div style={{ height: 6, background: C.faint, borderRadius: 3 }}>
+                        <div style={{ height: "100%", borderRadius: 3, background: C.accent, width: `${Math.round((batchIdx / pairs.length) * 100)}%`, transition: "width 0.3s" }} />
+                      </div>
+                    </div>
+                  )}
+
+                  <button onClick={runBatch} disabled={batchRun || pairs.every(p => !p.back)}
+                    style={{ width:"100%", padding:"13px", background: batchRun ? C.border : C.accent, color: batchRun ? C.muted : C.bg, border:"none", borderRadius:8, fontSize:15, fontFamily:"inherit", fontWeight:"bold", cursor: batchRun ? "not-allowed" : "pointer" }}>
+                    {batchRun ? `Обрабатываю ${batchIdx+1} из ${pairs.length}...` : `♪ Добавить ${pairs.length} ${pairs.length===1?"альбом":pairs.length<5?"альбома":"альбомов"}`}
+                  </button>
+                </>
+              )}
+
+              {/* Results */}
+              {batchFinished && (
+                <div style={{ textAlign: "center", padding: "20px 0" }}>
+                  <div style={{ fontSize: 28, marginBottom: 12 }}>
+                    {batchErr.length === 0 ? "🎵" : "⚠️"}
+                  </div>
+                  <div style={{ fontSize: 16, fontWeight: "bold", color: C.text, marginBottom: 8 }}>
+                    {batchDone.length > 0 && `Добавлено: ${batchDone.length} ${batchDone.length===1?"альбом":batchDone.length<5?"альбома":"альбомов"}`}
+                  </div>
+                  {batchErr.length > 0 && (
+                    <div style={{ fontSize: 13, color: C.dangerText, marginBottom: 12 }}>
+                      Ошибок: {batchErr.length}
+                    </div>
+                  )}
+                  <button onClick={resetBatch}
+                    style={{ padding: "10px 24px", background: C.accent, color: C.bg, border: "none", borderRadius: 8, fontFamily: "inherit", fontSize: 14, fontWeight: "bold", cursor: "pointer", marginTop: 8 }}>
+                    Добавить ещё
+                  </button>
+                </div>
+              )}
+            </>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+
+// ── AuthScreen ─────────────────────────────────────────────────────────────
+function AuthScreen({ onAuth }) {
+  const [mode,  setMode]  = useState("login"); // login | register
+  const [email, setEmail] = useState("");
+  const [pass,  setPass]  = useState("");
+  const [busy,  setBusy]  = useState(false);
+  const [err,   setErr]   = useState("");
+  const [info,  setInfo]  = useState("");
+
+  const submit = async () => {
+    if (!email || !pass) { setErr("Введите email и пароль"); return; }
+    setBusy(true); setErr(""); setInfo("");
+    try {
+      if (mode === "register") {
+        await authSignUp(email, pass);
+        setInfo("Проверьте почту — отправили письмо для подтверждения");
+        setMode("login");
+      } else {
+        const session = await authSignIn(email, pass);
+        try { await window.storage.set("session", JSON.stringify({ token: session.access_token, userId: session.user?.id, email })); } catch {}
+        onAuth({ token: session.access_token, userId: session.user?.id, email });
+      }
+    } catch (e) {
+      if (e.message === "Failed to fetch") {
+        setErr("Не удалось подключиться к серверу. Возможно CORS — добавьте * в Supabase → Settings → API → CORS Allowed Origins");
+      } else {
+        setErr(e.message);
+      }
+    }
+    setBusy(false);
+  };
+
+  const testConn = async () => {
+    setBusy(true); setErr(""); setInfo("");
+    try {
+      const r = await fetch(SB_URL + "/rest/v1/", {
+        headers: { "apikey": SB_KEY }
+      });
+      setInfo("Соединение OK — статус " + r.status + ". Теперь пробуй войти.");
+    } catch (e) {
+      setErr("Ошибка соединения: " + e.message + " | URL: " + SB_URL);
+    }
+    setBusy(false);
+  };
+
+  const inputStyle = {
+    width: "100%", padding: "11px 14px", background: C.surface,
+    border: `1px solid ${C.border}`, borderRadius: 8, color: C.text,
+    fontSize: 14, fontFamily: "inherit", boxSizing: "border-box", outline: "none",
+  };
+
+  return (
+    <div style={{ minHeight: "100vh", background: C.bg, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: '"Georgia","Times New Roman",serif' }}>
+      <div style={{ width: 340, padding: "36px 32px", background: C.surface, border: `1px solid ${C.border}`, borderRadius: 16 }}>
+        {/* Logo */}
+        <div style={{ textAlign: "center", marginBottom: 28 }}>
+          <div style={{ width: 52, height: 52, borderRadius: "50%", border: `2px solid ${C.accent}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22, margin: "0 auto 12px" }}>♪</div>
+          <div style={{ fontSize: 20, fontWeight: "bold", color: C.accent, letterSpacing: "0.08em", textTransform: "uppercase" }}>Vinyl Archive</div>
+          <div style={{ fontSize: 11, color: C.muted, marginTop: 3 }}>цифровой каталог</div>
+        </div>
+
+        {/* Mode toggle */}
+        <div style={{ display: "flex", gap: 0, border: `1px solid ${C.border}`, borderRadius: 8, overflow: "hidden", marginBottom: 20 }}>
+          {[["login","Войти"],["register","Регистрация"]].map(([m, label]) => (
+            <button key={m} onClick={() => { setMode(m); setErr(""); setInfo(""); }}
+              style={{ flex: 1, padding: "8px", background: mode===m ? C.accent : "transparent", color: mode===m ? C.bg : C.muted, border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 12, fontWeight: mode===m ? "bold" : "normal" }}>
+              {label}
+            </button>
+          ))}
+        </div>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <input type="email" placeholder="Email" value={email} onChange={e => setEmail(e.target.value)} style={inputStyle} onKeyDown={e => e.key === "Enter" && submit()} />
+          <input type="password" placeholder="Пароль" value={pass} onChange={e => setPass(e.target.value)} style={inputStyle} onKeyDown={e => e.key === "Enter" && submit()} />
+        </div>
+
+        {err  && <div style={{ marginTop: 12, fontSize: 12, color: C.dangerText, textAlign: "center" }}>{err}</div>}
+        {info && <div style={{ marginTop: 12, fontSize: 12, color: "#5aaa5a", textAlign: "center" }}>{info}</div>}
+
+        <button onClick={submit} disabled={busy}
+          style={{ width: "100%", marginTop: 16, padding: "12px", background: busy ? C.border : C.accent, color: busy ? C.muted : C.bg, border: "none", borderRadius: 8, fontSize: 14, fontFamily: "inherit", fontWeight: "bold", cursor: busy ? "not-allowed" : "pointer" }}>
+          {busy ? "Подождите..." : mode === "login" ? "Войти" : "Создать аккаунт"}
+        </button>
+        <button onClick={testConn} disabled={busy}
+          style={{ width: "100%", marginTop: 8, padding: "9px", background: "transparent", color: C.muted, border: `1px solid ${C.border}`, borderRadius: 8, fontSize: 12, fontFamily: "inherit", cursor: busy ? "not-allowed" : "pointer" }}>
+          Проверить соединение с БД
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── Main App ───────────────────────────────────────────────────────────────
+function VinylCatalog() {
+  const [user,    setUser]    = useState(null);  // {token, userId, email}
+  const [authLoading, setAuthLoading] = useState(true);
+  const [tab,     setTab]     = useState("catalog");
+  const [records, setRecords] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [dbOk,    setDbOk]    = useState(null);
+  const [q,       setQ]       = useState("");
+  const [filters, setFilters] = useState({ genres: [], decades: [], condition: null });
+  const [sort,    setSort]    = useState("artist");
+  const [detail,  setDetail]  = useState(null);
+
+  useEffect(() => {
+    const restoreSession = async () => {
+      try {
+        const s = await window.storage.get("session");
+        if (s?.value) {
+          const sess = JSON.parse(s.value);
+          _token  = sess.token;
+          _userId = sess.userId;
+          setUser(sess);
+        }
+      } catch {}
+      setAuthLoading(false);
+    };
+    restoreSession();
+  }, []);
+
+  useEffect(() => { if (user) loadAll(); }, [user]);
+
+  async function loadAll() {
+    setLoading(true);
+    try {
+      let existing = await dbGetAll();
+      setDbOk(true);
+
+      // Seed DB if empty
+      if (existing.length === 0) {
+        for (const rec of SEED) {
+          try { await dbSave(rec); } catch {}
+        }
+        existing = SEED;
+      } else {
+        // Patch missing price/thumbs from seed
+        const seedById = Object.fromEntries(SEED.map(r => [r.id, r]));
+        existing = await Promise.all(existing.map(async rec => {
+          const seed = seedById[rec.id];
+          if (!seed) return rec;
+          let u = { ...rec }; let changed = false;
+          if (!rec.price && seed.price)           { u.price = seed.price; changed = true; }
+          if (!rec.thumbFront && seed.thumbFront) { u.thumbFront = seed.thumbFront; u.thumb = seed.thumb; changed = true; }
+          if (!rec.thumbBack && seed.thumbBack)   { u.thumbBack = seed.thumbBack; changed = true; }
+          if (changed) { try { await dbSave(u); } catch {} }
+          return u;
+        }));
+      }
+
+      setRecords(existing.sort((a,b) => (a.artist||"").localeCompare(b.artist||"")));
+    } catch (e) {
+      console.error("loadAll error:", e);
+      setDbOk(false);
+      // Fallback to window.storage
+      try {
+        const res = await window.storage.list("vin:");
+        if (res?.keys?.length) {
+          const all = (await Promise.all(res.keys.map(async k => {
+            try { const r = await window.storage.get(k); return r ? JSON.parse(r.value) : null; } catch { return null; }
+          }))).filter(Boolean);
+          setRecords(all.sort((a,b) => (a.artist||"").localeCompare(b.artist||"")));
+        } else {
+          setRecords(SEED);
+        }
+      } catch {}
+    }
+    setLoading(false);
+  }
+
+  const updateRecord = rec => {
+    setRecords(p => p.map(r => r.id === rec.id ? rec : r));
+    if (detail?.id === rec.id) setDetail(rec);
+    dbSave(rec).catch(() => window.storage.set(rec.id, JSON.stringify(rec)).catch(()=>{}));
+  };
+
+  const deleteRecord = async rec => {
+    try { await dbDelete(rec.id); } catch {}
+    try { await window.storage.delete(rec.id); } catch {}
+    setRecords(p => p.filter(r => r.id !== rec.id));
+    setDetail(null);
+  };
+
+  const applyFilters = (list) => {
+    let r = list;
+    if (q.trim()) {
+      const lq = q.toLowerCase();
+      r = r.filter(x => x.artist?.toLowerCase().includes(lq) || x.album?.toLowerCase().includes(lq) ||
+        x.genre?.toLowerCase().includes(lq) || x.year?.includes(lq) ||
+        x.label?.toLowerCase().includes(lq) || x.tracks?.some(t => t.title?.toLowerCase().includes(lq)));
+    }
+    if (filters.genres.length)    r = r.filter(x => filters.genres.includes(x.genre));
+    if (filters.decades.length)   r = r.filter(x => x.year && filters.decades.includes(Math.floor(+x.year/10)*10));
+    if (filters.condition)        r = r.filter(x => x.condition === filters.condition);
+    return r;
+  };
+
+  const applySorting = (list) => {
+    const s = [...list];
+    if (sort === "artist")     return s.sort((a,b) => (a.artist||"").localeCompare(b.artist||""));
+    if (sort === "date")       return s.sort((a,b) => (b.at||"").localeCompare(a.at||""));
+    if (sort === "priceAsc")   return s.sort((a,b) => (a.price?.low||0) - (b.price?.low||0));
+    if (sort === "priceDesc")  return s.sort((a,b) => (b.price?.high||0) - (a.price?.high||0));
+    return s;
+  };
+
+  const hits = applySorting(applyFilters(records));
+  const stats = [
+    ["Альбомов", records.length],
+    ["Треков",   records.reduce((s,r) => s+(r.tracks?.length||0), 0)],
+    ["Исполнителей", new Set(records.map(r => r.artist)).size],
+  ];
+
+  const navBtn = (t, label) => (
+    <button key={t} onClick={() => { setTab(t); setDetail(null); }}
+      style={{ padding:"7px 18px", borderRadius:20, border:`1px solid ${tab===t?C.accent:C.border}`, background:tab===t?C.accent:"transparent", color:tab===t?C.bg:C.muted, cursor:"pointer", fontSize:12, fontFamily:"inherit", fontWeight:tab===t?"bold":"normal" }}>
+      {label}
+    </button>
+  );
+
+  if (authLoading) return (
+    <div style={{ minHeight: "100vh", background: C.bg, display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <div style={{ color: C.muted, fontFamily: '"Georgia",serif', fontSize: 14 }}>Загрузка...</div>
+    </div>
+  );
+
+  if (!user) return (
+    <AuthScreen onAuth={sess => { _token = sess.token; _userId = sess.userId; setUser(sess); }} />
+  );
+
+  return (
+    <div style={{ fontFamily: '"Georgia","Times New Roman",serif', background: C.bg, minHeight: "100vh", color: C.text }}>
+      {/* Header */}
+      <div style={{ background: C.surface, borderBottom: `1px solid ${C.border}`, padding: "13px 24px", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ width: 34, height: 34, borderRadius: "50%", border: `2px solid ${C.accent}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16 }}>♪</div>
+          <div>
+            <div style={{ fontSize: 16, fontWeight: "bold", color: C.accent, letterSpacing: "0.08em", textTransform: "uppercase", lineHeight: 1 }}>Vinyl Archive</div>
+            <div style={{ fontSize: 10, color: C.muted, display: "flex", alignItems: "center", gap: 5 }}>
+              цифровой каталог
+              <span style={{ width: 6, height: 6, borderRadius: "50%", background: dbOk === null ? "#888" : dbOk ? "#5aaa5a" : "#e06060", display: "inline-block" }} title={dbOk === null ? "Подключение..." : dbOk ? "Supabase: подключено" : "Supabase: ошибка"} />
+            </div>
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          {navBtn("catalog", `Каталог (${records.length})`)}
+          {navBtn("stats",   "Статистика")}
+          {navBtn("add",     "+ Добавить")}
+          <div style={{ width: 1, height: 20, background: C.border }} />
+          <ExportButtons records={records} />
+          <div style={{ width: 1, height: 20, background: C.border }} />
+          <button onClick={async () => { await authSignOut(); try { await window.storage.delete("session"); } catch {} setUser(null); setRecords([]); }}
+            style={{ padding: "7px 14px", background: "transparent", border: `1px solid ${C.border}`, color: C.muted, borderRadius: 6, cursor: "pointer", fontFamily: "inherit", fontSize: 12 }}>
+            Выйти
+          </button>
+        </div>
+      </div>
+
+      {/* Catalog */}
+      {tab === "catalog" && (
+        <div style={{ padding: 24 }}>
+          {detail ? (
+            <DetailView record={detail} onBack={() => setDetail(null)} onDelete={deleteRecord} onUpdate={updateRecord} />
+          ) : (
+            <>
+              {records.length > 0 && (
+                <div style={{ display: "flex", gap: 10, marginBottom: 20 }}>
+                  {stats.map(([label, val]) => (
+                    <div key={label} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 8, padding: "10px 22px", textAlign: "center" }}>
+                      <div style={{ fontSize: 24, fontWeight: "bold", color: C.accent, lineHeight: 1 }}>{val}</div>
+                      <div style={{ fontSize: 11, color: C.muted, marginTop: 3 }}>{label}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div style={{ marginBottom: 12, position: "relative" }}>
+                <span style={{ position:"absolute", left:13, top:"50%", transform:"translateY(-50%)", color:C.muted, fontSize:15, pointerEvents:"none" }}>♪</span>
+                <input value={q} onChange={e => setQ(e.target.value)} placeholder="Поиск по исполнителю, альбому, треку..."
+                  style={{ width:"100%", padding:"11px 14px 11px 38px", background:C.surface, border:`1px solid ${C.border}`, borderRadius:8, color:C.text, fontSize:14, fontFamily:"inherit", boxSizing:"border-box", outline:"none" }} />
+                {q && <button onClick={() => setQ("")} style={{ position:"absolute", right:12, top:"50%", transform:"translateY(-50%)", background:"none", border:"none", color:C.muted, cursor:"pointer", fontSize:16, padding:0 }}>×</button>}
+              </div>
+              <FilterBar records={records} filters={filters} setFilters={setFilters} sort={sort} setSort={setSort} />
+              <CollectionValue records={records} />
+              {loading ? (
+                <div style={{ textAlign:"center", padding:"70px 0", color:C.muted }}>Загрузка...</div>
+              ) : hits.length === 0 ? (
+                <div style={{ textAlign:"center", padding:"60px 0", color:C.muted }}>Ничего не найдено</div>
+              ) : (
+                <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(150px,1fr))", gap:14 }}>
+                  {hits.map(r => <AlbumCard key={r.id} record={r} onClick={setDetail} />)}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
+      {/* Stats */}
+      {tab === "stats" && <StatsView records={records} />}
+
+      {/* Add */}
+      {tab === "add" && <AddView onAdded={rec => { setRecords(p => [...p, rec].sort((a,b) => (a.artist||"").localeCompare(b.artist||""))); setTab("catalog"); setDetail(rec); }} />}
+    </div>
+  );
+}
+
+
+function exportToPDF(records, setStatus) {
+  try {
+    setStatus("Генерирую PDF...");
+
+    const priced = records.filter(r => r.price);
+    const totalLow  = priced.reduce((s, r) => s + (adjPrice(r.price, r.condition)?.low  || 0), 0);
+    const totalHigh = priced.reduce((s, r) => s + (adjPrice(r.price, r.condition)?.high || 0), 0);
+    const totalTracks = records.reduce((s, r) => s + (r.tracks?.length || 0), 0);
+    const date = new Date().toLocaleDateString("ru-RU", { year: "numeric", month: "long", day: "numeric" });
+
+    const albumCards = records.map(rec => {
+      const p = rec.price ? adjPrice(rec.price, rec.condition) : null;
+      const cond = rec.condition ? CONDITIONS.find(c => c.key === rec.condition) : null;
+      const tracks = (rec.tracks || []).slice(0, 8).map(t => t.title).join(" · ");
+      const moreTracks = rec.tracks?.length > 8 ? ` +${rec.tracks.length - 8}` : "";
+      const img = rec.thumbFront || rec.thumb;
+
+      return `
+        <div class="card">
+          <div class="cover">${img
+            ? `<img src="${img}" alt="${rec.album}" />`
+            : `<div class="no-cover">♪</div>`
+          }</div>
+          <div class="info">
+            <div class="title">${rec.album || "—"}</div>
+            <div class="artist">${rec.artist || ""}</div>
+            <div class="tags">${[rec.year, rec.genre, rec.label].filter(Boolean).join(" · ")}</div>
+            <div class="bottom-row">
+              ${cond ? `<span class="cond" style="color:${cond.color};border-color:${cond.color}44">${cond.label}</span>` : ""}
+              ${p ? `<span class="price">$${p.low}–$${p.high}</span>` : ""}
+            </div>
+            ${tracks ? `<div class="tracks">${tracks}${moreTracks}</div>` : ""}
+          </div>
+        </div>`;
+    }).join("");
+
+    const html = `<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>Vinyl Archive — Каталог</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: Georgia, "Times New Roman", serif; background: #fff; color: #1a1208; }
+
+  /* Cover page */
+  .cover-page {
+    width: 100%; height: 100vh; min-height: 297mm;
+    background: #13100c;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    page-break-after: always; break-after: page;
+  }
+  .cover-line { width: 160px; height: 1px; background: #c8821e; margin: 16px 0; }
+  .cover-title { font-size: 52px; font-weight: bold; color: #c8821e; letter-spacing: 0.12em; line-height: 1.1; text-align: center; }
+  .cover-subtitle { font-size: 13px; color: #b8986a; letter-spacing: 0.08em; }
+  .cover-stats { margin-top: 28px; display: flex; flex-direction: column; gap: 8px; align-items: center; }
+  .cover-stat { font-size: 12px; color: #8a7454; }
+  .cover-stat strong { color: #d4aa70; margin-left: 6px; }
+  .cover-date { position: absolute; bottom: 40px; font-size: 11px; color: #5a4a34; }
+
+  /* Catalog pages */
+  .page-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 10px 20px 8px; border-bottom: 1px solid #c8821e;
+    margin-bottom: 16px;
+  }
+  .page-header-title { font-size: 13px; font-weight: bold; color: #c8821e; letter-spacing: 0.1em; }
+  .page-header-date { font-size: 9px; color: #9a8464; }
+
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; padding: 0 20px 20px; }
+
+  .card {
+    border: 0.5px solid #d4c4a0; border-radius: 6px; overflow: hidden;
+    background: #faf8f3; break-inside: avoid;
+  }
+  .cover { width: 100%; aspect-ratio: 1; overflow: hidden; background: #ede8de; }
+  .cover img { width: 100%; height: 100%; object-fit: contain; background: #0a0806; display: block; }
+  .no-cover { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; font-size: 36px; color: #c8b898; }
+  .info { padding: 8px 10px 10px; border-top: 1.5px solid #c8821e; }
+  .title { font-size: 11px; font-weight: bold; color: #1a1208; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 3px; }
+  .artist { font-size: 10px; color: #c8821e; margin-bottom: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tags { font-size: 8.5px; color: #7a6a50; margin-bottom: 5px; }
+  .bottom-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+  .cond { font-size: 8px; font-weight: bold; border: 0.5px solid; border-radius: 3px; padding: 1px 5px; }
+  .price { font-size: 10px; font-weight: bold; color: #3a9a3a; }
+  .tracks { font-size: 7.5px; color: #9a8a70; line-height: 1.4; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+
+  @media print {
+    @page { size: A4; margin: 0; }
+    body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    .cover-page { height: 100vh; }
+  }
+</style>
+</head>
+<body>
+  <div class="cover-page">
+    <div class="cover-title">VINYL<br>ARCHIVE</div>
+    <div class="cover-line"></div>
+    <div class="cover-subtitle">Каталог виниловой коллекции</div>
+    <div class="cover-stats">
+      <div class="cover-stat">${records.length} альбомов <strong>·</strong> ${totalTracks} треков</div>
+      <div class="cover-stat">${new Set(records.map(r => r.artist)).size} исполнителей</div>
+      ${totalLow > 0 ? '<div class="cover-stat">Стоимость: <strong>$' + totalLow.toLocaleString() + '–$' + totalHigh.toLocaleString() + ' USD</strong></div>' : ""}
+    </div>
+    <div class="cover-date">${date}</div>
+  </div>
+
+  <div class="page-header">
+    <div class="page-header-title">VINYL ARCHIVE</div>
+    <div class="page-header-date">${date}</div>
+  </div>
+  <div class="grid">${albumCards}</div>
+
+  <script>window.onload = () => { setTimeout(() => window.print(), 500); }<\/script>
+</body>
+</html>`;
+
+    const blob = new Blob([html], { type: "text/html;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const win = window.open(url, "_blank");
+    if (!win) {
+      // fallback: download HTML
+      const a = document.createElement("a");
+      a.href = url; a.download = "vinyl-catalog.html"; a.click();
+    }
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+    setStatus(null);
+  } catch (e) {
+    setStatus("error:" + (e.message || "неизвестная ошибка"));
+  }
+}
+
+
+
+
+
+
+const _r=ReactDOM.createRoot(document.getElementById('root'));
+_r.render(React.createElement(VinylCatalog));
+
+  </script>
+  <script>document.getElementById("splash").style.display="none";if("serviceWorker"in navigator)navigator.serviceWorker.register("/sw.js");</script>
+</body>
+</html>
