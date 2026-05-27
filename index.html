@@ -163,6 +163,74 @@ async function dbCanAddAlbum() {
   return { allowed: false, free: false, balance: bal.balance };
 }
 
+async function dbActivatePromo(code) {
+  // Check code exists and active
+  const r = await fetch(
+    SB_URL + "/rest/v1/promo_codes?code=eq." + encodeURIComponent(code.trim().toUpperCase()) + "&status=eq.active&select=*",
+    { headers: sbHeaders() }
+  );
+  if (!r.ok) throw new Error("Ошибка проверки кода");
+  const rows = await r.json();
+  if (!rows.length) throw new Error("Код не найден или уже использован");
+  const promo = rows[0];
+
+  // Mark as used
+  const r2 = await fetch(
+    SB_URL + "/rest/v1/promo_codes?id=eq." + promo.id,
+    {
+      method: "PATCH",
+      headers: { ...sbHeaders(), "Prefer": "return=minimal" },
+      body: JSON.stringify({ status: "used", used_by: _userId, used_at: new Date().toISOString() }),
+    }
+  );
+  if (!r2.ok) throw new Error("Ошибка активации кода");
+
+  // Add to balance
+  const bal = await dbGetBalance();
+  const newBalance = (bal?.balance || 0) + promo.amount;
+  await fetch(SB_URL + "/rest/v1/balances?user_id=eq." + _userId, {
+    method: "PATCH",
+    headers: { ...sbHeaders(), "Prefer": "return=minimal" },
+    body: JSON.stringify({ balance: newBalance, updated_at: new Date().toISOString() }),
+  });
+
+  // Record transaction
+  await fetch(SB_URL + "/rest/v1/transactions", {
+    method: "POST",
+    headers: { ...sbHeaders(), "Prefer": "return=minimal" },
+    body: JSON.stringify({
+      user_id: _userId,
+      type: "topup",
+      amount: promo.amount,
+      description: "Пополнение по коду " + promo.code,
+      status: "completed",
+    }),
+  });
+
+  return promo.amount;
+}
+
+async function dbGenerateCodes(count, amount, note) {
+  const codes = [];
+  for (let i = 0; i < count; i++) {
+    const rand = Math.random().toString(36).substring(2, 8).toUpperCase();
+    codes.push({
+      code: "VINYL-" + rand,
+      amount,
+      note: note || "",
+      status: "active",
+    });
+  }
+  const r = await fetch(SB_URL + "/rest/v1/promo_codes", {
+    method: "POST",
+    headers: { ...sbHeaders(), "Prefer": "return=representation" },
+    body: JSON.stringify(codes),
+  });
+  if (!r.ok) throw new Error("Ошибка создания кодов");
+  return await r.json();
+}
+
+
 
 const C = {
   bg: "#13100c", surface: "#1c1710", card: "#252018", cardHover: "#2e2820",
@@ -349,7 +417,10 @@ async function fetchPrice(artist, album, label, year) {
 }
 
 function exportToExcel(records) {
-  const rows = records.map(r => ({
+  const wb = XLSX.utils.book_new();
+
+  // ── Лист 1: Альбомы ───────────────────────────────────────────────────
+  const albumRows = records.map(r => ({
     "Исполнитель":   r.artist || "",
     "Альбом":        r.album  || "",
     "Год":           r.year   || "",
@@ -359,15 +430,34 @@ function exportToExcel(records) {
     "Состояние":     r.condition || "",
     "Треков":        r.tracks?.length || 0,
     "Цена мин ($)":  r.price?.low    || "",
-    "Медиана ($)":   r.price?.median || "",
+    "Медиана ($)":   r.price ? Math.round((r.price.low + r.price.high) / 2) : "",
     "Цена макс ($)": r.price?.high   || "",
     "Discogs":       r.price?.url    || "",
   }));
-  const ws = XLSX.utils.json_to_sheet(rows);
-  const colWidths = [20,30,6,16,20,12,10,8,12,12,12,40];
-  ws["!cols"] = colWidths.map(w => ({ wch: w }));
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, "Vinyl Catalog");
+  const ws1 = XLSX.utils.json_to_sheet(albumRows);
+  ws1["!cols"] = [20,30,6,16,20,12,10,8,12,12,12,40].map(w => ({ wch: w }));
+  XLSX.utils.book_append_sheet(wb, ws1, "Альбомы");
+
+  // ── Лист 2: Треки ─────────────────────────────────────────────────────
+  const trackRows = [];
+  records.forEach(r => {
+    (r.tracks || []).forEach(t => {
+      trackRows.push({
+        "Исполнитель":  r.artist || "",
+        "Альбом":       r.album  || "",
+        "Год":          r.year   || "",
+        "Жанр":         r.genre  || "",
+        "Сторона":      t.side   || "",
+        "№":            t.number || "",
+        "Название трека": t.title || "",
+        "Длительность": t.duration || "",
+      });
+    });
+  });
+  const ws2 = XLSX.utils.json_to_sheet(trackRows.length ? trackRows : [{ "Треки": "Нет данных" }]);
+  ws2["!cols"] = [20,30,6,16,8,4,40,10].map(w => ({ wch: w }));
+  XLSX.utils.book_append_sheet(wb, ws2, "Треки");
+
   XLSX.writeFile(wb, "vinyl-catalog.xlsx");
 }
 
@@ -1317,11 +1407,103 @@ function AddView({ onAdded }) {
 
 
 
+
+function AdminPanel({ onClose }) {
+  const [count,  setCount]  = useState(10);
+  const [amount, setAmount] = useState(100);
+  const [note,   setNote]   = useState("");
+  const [codes,  setCodes]  = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState("");
+
+  const generate = async () => {
+    setLoading(true); setErr("");
+    try {
+      const result = await dbGenerateCodes(count, amount, note);
+      setCodes(result);
+    } catch (e) { setErr(e.message); }
+    setLoading(false);
+  };
+
+  const copyAll = () => {
+    const text = codes.map(c => c.code + " — ₽" + c.amount).join("\n");
+    navigator.clipboard?.writeText(text);
+  };
+
+  const inputStyle = { width: "100%", padding: "9px 12px", background: C.card, border: `1px solid ${C.border}`, borderRadius: 8, color: C.text, fontSize: 13, fontFamily: "inherit", outline: "none", boxSizing: "border-box" };
+
+  return (
+    <div style={{ maxWidth: 480, margin: "0 auto", padding: 24 }}>
+      <button onClick={onClose} style={{ marginBottom: 20, padding: "7px 16px", background: "transparent", border: `1px solid ${C.border}`, color: C.muted, borderRadius: 6, cursor: "pointer", fontFamily: "inherit", fontSize: 13 }}>← Назад</button>
+      <div style={{ fontSize: 18, fontWeight: "bold", marginBottom: 20, color: C.accent }}>Генератор кодов</div>
+
+      <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16, marginBottom: 16 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
+          <div>
+            <div style={{ fontSize: 11, color: C.muted, marginBottom: 6 }}>Количество кодов</div>
+            <input type="number" value={count} onChange={e => setCount(+e.target.value)} min={1} max={100} style={inputStyle} />
+          </div>
+          <div>
+            <div style={{ fontSize: 11, color: C.muted, marginBottom: 6 }}>Номинал (₽)</div>
+            <input type="number" value={amount} onChange={e => setAmount(+e.target.value)} min={1} style={inputStyle} />
+          </div>
+        </div>
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ fontSize: 11, color: C.muted, marginBottom: 6 }}>Заметка (необязательно)</div>
+          <input value={note} onChange={e => setNote(e.target.value)} placeholder="Например: для Telegram канала" style={inputStyle} />
+        </div>
+        {err && <div style={{ fontSize: 12, color: C.dangerText, marginBottom: 8 }}>{err}</div>}
+        <button onClick={generate} disabled={loading}
+          style={{ width: "100%", padding: "12px", background: loading ? C.border : C.accent, color: loading ? C.muted : C.bg, border: "none", borderRadius: 8, fontFamily: "inherit", fontSize: 14, fontWeight: "bold", cursor: loading ? "not-allowed" : "pointer" }}>
+          {loading ? "Генерирую..." : `Создать ${count} код${count === 1 ? "" : count < 5 ? "а" : "ов"} по ₽${amount}`}
+        </button>
+      </div>
+
+      {codes.length > 0 && (
+        <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+            <div style={{ fontSize: 13, color: C.text, fontWeight: "bold" }}>Сгенерировано {codes.length} кодов</div>
+            <button onClick={copyAll} style={{ padding: "5px 12px", background: C.card, border: `1px solid ${C.border}`, color: C.muted, borderRadius: 6, cursor: "pointer", fontFamily: "inherit", fontSize: 11 }}>
+              Копировать все
+            </button>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 300, overflowY: "auto" }}>
+            {codes.map((c, i) => (
+              <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 12px", background: C.card, borderRadius: 8 }}>
+                <span style={{ fontSize: 13, color: C.accent, letterSpacing: "0.05em", fontWeight: "bold" }}>{c.code}</span>
+                <span style={{ fontSize: 12, color: "#5aaa5a" }}>₽{c.amount}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function BalanceView({ onClose }) {
   const [bal,  setBal]   = useState(null);
   const [txns, setTxns]  = useState([]);
   const [loading, setLoading] = useState(true);
   const [topupOpen, setTopupOpen] = useState(false);
+  const [promoCode,  setPromoCode]  = useState("");
+  const [promoLoading, setPromoLoading] = useState(false);
+  const [promoMsg, setPromoMsg] = useState(null);
+
+  const activatePromo = async () => {
+    if (!promoCode || promoLoading) return;
+    setPromoLoading(true); setPromoMsg(null);
+    try {
+      const amount = await dbActivatePromo(promoCode);
+      setPromoMsg({ ok: true, text: "✓ Баланс пополнен на ₽" + amount });
+      setPromoCode("");
+      const [b, t] = await Promise.all([dbGetBalance(), dbGetTransactions()]);
+      setBal(b); setTxns(t);
+    } catch (e) {
+      setPromoMsg({ ok: false, text: "✕ " + e.message });
+    }
+    setPromoLoading(false);
+  };
 
   useEffect(() => {
     Promise.all([dbGetBalance(), dbGetTransactions()]).then(([b, t]) => {
@@ -1369,19 +1551,27 @@ function BalanceView({ onClose }) {
       {/* Topup section */}
       {topupOpen && (
         <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16, marginBottom: 16 }}>
-          <div style={{ fontSize: 11, color: C.muted, textTransform: "uppercase", letterSpacing: "0.12em", marginBottom: 12 }}>Пополнение через СБП · РНКО Монета</div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 14 }}>
-            {AMOUNTS.map(amt => (
-              <button key={amt} style={{ padding: "11px", background: C.card, border: `1px solid ${C.border}`, borderRadius: 8, color: C.text, fontSize: 13, fontFamily: "inherit", cursor: "pointer" }}>
-                ₽ {amt}
-              </button>
-            ))}
+          {/* Promo code activation */}
+          <div style={{ fontSize: 11, color: C.muted, textTransform: "uppercase", letterSpacing: "0.12em", marginBottom: 12 }}>Активировать код пополнения</div>
+          <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+            <input
+              value={promoCode}
+              onChange={e => setPromoCode(e.target.value.toUpperCase())}
+              placeholder="VINYL-XXXXXX"
+              style={{ flex: 1, padding: "10px 12px", background: C.card, border: `1px solid ${C.border}`, borderRadius: 8, color: C.text, fontSize: 14, fontFamily: "inherit", outline: "none", letterSpacing: "0.05em" }}
+              onKeyDown={e => e.key === "Enter" && activatePromo()}
+            />
+            <button onClick={activatePromo} disabled={promoLoading || !promoCode}
+              style={{ padding: "10px 16px", background: promoCode && !promoLoading ? C.accent : C.border, color: promoCode && !promoLoading ? C.bg : C.muted, border: "none", borderRadius: 8, fontFamily: "inherit", fontSize: 13, fontWeight: "bold", cursor: promoCode && !promoLoading ? "pointer" : "not-allowed" }}>
+              {promoLoading ? "..." : "Активировать"}
+            </button>
           </div>
-          <div style={{ background: C.card, borderRadius: 8, padding: 16, textAlign: "center", marginBottom: 10 }}>
-            <div style={{ fontSize: 13, color: C.muted, marginBottom: 8 }}>QR код появится здесь после подключения РНКО Монета</div>
-            <div style={{ width: 100, height: 100, background: C.faint, borderRadius: 8, margin: "0 auto", display: "flex", alignItems: "center", justifyContent: "center", color: C.muted, fontSize: 11 }}>QR</div>
-          </div>
-          <div style={{ fontSize: 10, color: C.muted, textAlign: "center" }}>Интеграция с платёжной системой в разработке</div>
+          {promoMsg && (
+            <div style={{ fontSize: 12, padding: "8px 12px", borderRadius: 6, background: promoMsg.ok ? "#0e2a0e" : "#2a0e0e", color: promoMsg.ok ? "#5aaa5a" : C.dangerText, marginBottom: 8 }}>
+              {promoMsg.text}
+            </div>
+          )}
+          <div style={{ fontSize: 10, color: C.muted, textAlign: "center" }}>Для получения кода обратитесь к администратору</div>
         </div>
       )}
 
@@ -1655,6 +1845,7 @@ function VinylCatalog() {
           {navBtn("stats",   "Статистика")}
           {navBtn("add",     "+ Добавить")}
           {navBtn("balance", "₽ Баланс")}
+          {user?.email?.includes("admin") || user?.email === "bartsits_b@mail.ru" ? navBtn("admin", "⚙️ Коды") : null}
           <div style={{ width: 1, height: 20, background: C.border }} />
           <ExportButtons records={records} />
           <div style={{ width: 1, height: 20, background: C.border }} />
@@ -1709,6 +1900,9 @@ function VinylCatalog() {
 
       {/* Balance */}
       {tab === "balance" && <BalanceView onClose={() => setTab("catalog")} />}
+
+      {/* Admin */}
+      {tab === "admin" && <AdminPanel onClose={() => setTab("catalog")} />}
 
       {/* Add */}
       {tab === "add" && <AddView onAdded={rec => { setRecords(p => [...p, rec].sort((a,b) => (a.artist||"").localeCompare(b.artist||""))); setTab("catalog"); setDetail(rec); }} />}
