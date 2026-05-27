@@ -1150,14 +1150,15 @@ function BalanceStatus({ refreshKey }) {
     dbCheckBalance().then(setInfo).catch(() => {});
   }, [refreshKey]);
   if (!info) return null;
-  if (info.free && info.remaining > 0) return (
+  const remaining = info.remaining || 0;
+  if (remaining > 0) return (
     <div style={{ marginBottom: 12, padding: "8px 12px", background: "#0e2a0e", border: "1px solid #1a4a1a", borderRadius: 8, fontSize: 12, color: "#5aaa5a" }}>
-      🎵 Бесплатных попыток осталось: <strong>{info.remaining}</strong>
+      🎵 Бесплатных попыток осталось: <strong>{remaining}</strong>
     </div>
   );
   if (!info.allowed) return (
     <div style={{ marginBottom: 12, padding: "8px 12px", background: "#2a0e0e", border: `1px solid ${C.danger}`, borderRadius: 8, fontSize: 12, color: C.dangerText }}>
-      ⚠️ Баланс: ₽{info.balance}. Для добавления нужно ₽4. <strong>Пополните баланс.</strong>
+      ⚠️ Баланс: ₽{info.balance}. Для добавления нужно ₽4. <strong>Пополните баланс во вкладке «₽ Баланс».</strong>
     </div>
   );
   return (
