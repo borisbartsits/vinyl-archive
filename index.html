@@ -985,6 +985,16 @@ function StatsView({ records }) {
           ↓ Резервная копия
         </button>
       </div>
+      <div style={{ display: "flex", gap: 10, marginBottom: 10, flexWrap: "wrap" }}>
+        <button onClick={() => exportToExcel(records)}
+          style={{ flex: 1, padding: "12px", background: C.surface, border: `1px solid ${C.border}`, color: C.text, borderRadius: 8, cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: "bold" }}>
+          ↓ Excel
+        </button>
+        <button onClick={() => exportJSON(records)}
+          style={{ flex: 1, padding: "12px", background: C.surface, border: `1px solid ${C.border}`, color: "#5aaa5a", borderRadius: 8, cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: "bold" }}>
+          ↓ Резервная копия JSON
+        </button>
+      </div>
       <ImportSection onImported={rec => { setRecords(p => [...p, rec].sort((a,b) => (a.artist||"").localeCompare(b.artist||""))); }} />
     </div>
   );
