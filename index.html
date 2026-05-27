@@ -147,7 +147,7 @@ async function dbDeductBalance(amount, description, type) {
 
 async function dbCanAddAlbum() {
   const bal = await dbGetBalance();
-  if (!bal) return { allowed: true, free: true };
+  if (!bal) return { allowed: true, free: true, remaining: 0 };
   if (bal.used_free < bal.free_albums) {
     await fetch(SB_URL + "/rest/v1/balances?user_id=eq." + _userId, {
       method: "PATCH",
@@ -161,6 +161,19 @@ async function dbCanAddAlbum() {
     return { allowed: true, free: false };
   }
   return { allowed: false, free: false, balance: bal.balance };
+}
+
+async function dbCheckBalance() {
+  const bal = await dbGetBalance();
+  if (!bal) return { allowed: true, free: true, remaining: 0, balance: 0 };
+  const remaining = Math.max(0, bal.free_albums - bal.used_free);
+  return {
+    allowed: remaining > 0 || bal.balance >= 4,
+    free: remaining > 0,
+    remaining,
+    balance: bal.balance,
+    freeTotal: bal.free_albums,
+  };
 }
 
 async function dbActivatePromo(code) {
@@ -1091,6 +1104,30 @@ function StatsView({ records }) {
 }
 
 // ── AddView ────────────────────────────────────────────────────────────────
+
+function BalanceStatus() {
+  const [info, setInfo] = useState(null);
+  useEffect(() => {
+    dbCheckBalance().then(setInfo).catch(() => {});
+  }, []);
+  if (!info) return null;
+  if (info.free && info.remaining > 0) return (
+    <div style={{ marginBottom: 12, padding: "8px 12px", background: "#0e2a0e", border: "1px solid #1a4a1a", borderRadius: 8, fontSize: 12, color: "#5aaa5a" }}>
+      🎵 Бесплатных попыток осталось: <strong>{info.remaining}</strong>
+    </div>
+  );
+  if (!info.allowed) return (
+    <div style={{ marginBottom: 12, padding: "8px 12px", background: "#2a0e0e", border: `1px solid ${C.danger}`, borderRadius: 8, fontSize: 12, color: C.dangerText }}>
+      ⚠️ Баланс: ₽{info.balance}. Для добавления нужно ₽4. <strong>Пополните баланс.</strong>
+    </div>
+  );
+  return (
+    <div style={{ marginBottom: 12, padding: "8px 12px", background: C.card, border: `1px solid ${C.border}`, borderRadius: 8, fontSize: 12, color: C.muted }}>
+      Баланс: <strong style={{ color: C.accent }}>₽{info.balance}</strong> · Спишется ₽4 за альбом
+    </div>
+  );
+}
+
 function AddView({ onAdded }) {
   const [mode, setMode]       = useState("single"); // "single" | "batch"
 
@@ -1126,6 +1163,13 @@ function AddView({ onAdded }) {
     if (!front || !back || busy) return;
     setBusy(true); setErr("");
     try {
+      setStep("Проверяю баланс...");
+      const check = await dbCheckBalance().catch(() => ({ allowed: true, free: true, remaining: 0 }));
+      if (!check.allowed) {
+        setErr("Недостаточно средств. Баланс: ₽" + check.balance + ". Пополните баланс во вкладке «₽ Баланс»");
+        setBusy(false);
+        return;
+      }
       setStep("Обрезаю обложки...");
       const [thumbFront, thumbBack] = await Promise.all([smartCropToB64(front.file), smartCropToB64(back.file)]);
       setStep("ИИ читает пластинку...");
@@ -1250,6 +1294,7 @@ function AddView({ onAdded }) {
       {/* ── Single mode ── */}
       {mode === "single" && (
         <>
+          <BalanceStatus />
           <div style={{ fontSize: 13, color: C.muted, marginBottom: 16, lineHeight: 1.6 }}>
             Загрузите фото лицевой и задней стороны.<br />Фон обрежется автоматически, ИИ распознает треки.
           </div>
