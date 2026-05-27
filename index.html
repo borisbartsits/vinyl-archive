@@ -1164,9 +1164,9 @@ function AddView({ onAdded }) {
     setBusy(true); setErr("");
     try {
       setStep("Проверяю баланс...");
-      const check = await dbCheckBalance().catch(() => ({ allowed: true, free: true, remaining: 0 }));
+      const check = await dbCanAddAlbum().catch(() => ({ allowed: true, free: true }));
       if (!check.allowed) {
-        setErr("Недостаточно средств. Баланс: ₽" + check.balance + ". Пополните баланс во вкладке «₽ Баланс»");
+        setErr("Недостаточно средств. Баланс: ₽" + (check.balance || 0) + ". Пополните баланс во вкладке «₽ Баланс»");
         setBusy(false);
         return;
       }
