@@ -115,8 +115,38 @@ async function dbDelete(id) {
   if (!r.ok) throw new Error("DB delete: " + r.status);
 }
 
+
+async function sbFetch(url, opts = {}) {
+  let r = await fetch(url, { ...opts, headers: { ...sbHeaders(), ...(opts.headers || {}) } });
+  if (r.status === 401) {
+    // Try refresh
+    try {
+      const s = await window.storage.get("session");
+      if (s?.value) {
+        const sess = JSON.parse(s.value);
+        if (sess.refreshToken) {
+          const rr = await fetch(SB_URL + "/auth/v1/token?grant_type=refresh_token", {
+            method: "POST",
+            headers: { "apikey": SB_KEY, "Content-Type": "application/json" },
+            body: JSON.stringify({ refresh_token: sess.refreshToken }),
+          });
+          if (rr.ok) {
+            const rd = await rr.json();
+            _token = rd.access_token;
+            _userId = rd.user?.id;
+            await window.storage.set("session", JSON.stringify({ ...sess, token: rd.access_token, refreshToken: rd.refresh_token, userId: rd.user?.id }));
+            // Retry original request
+            r = await fetch(url, { ...opts, headers: { ...sbHeaders(), ...(opts.headers || {}) } });
+          }
+        }
+      }
+    } catch {}
+  }
+  return r;
+}
+
 async function dbGetBalance() {
-  const r = await fetch(SB_URL + "/rest/v1/balances?select=*&user_id=eq." + _userId, { headers: sbHeaders() });
+  const r = await sbFetch(SB_URL + "/rest/v1/balances?select=*&user_id=eq." + _userId);
   if (!r.ok) return null;
   const d = await r.json();
   return d[0] || null;
@@ -147,13 +177,22 @@ async function dbDeductBalance(amount, description, type) {
 
 async function dbCanAddAlbum() {
   const bal = await dbGetBalance();
-  if (!bal) return { allowed: true, free: true, remaining: 0 };
-  if (bal.used_free < bal.free_albums) {
-    await fetch(SB_URL + "/rest/v1/balances?user_id=eq." + _userId, {
-      method: "PATCH",
+  if (!bal) {
+    // No balance record - create one
+    await fetch(SB_URL + "/rest/v1/balances", {
+      method: "POST",
       headers: { ...sbHeaders(), "Prefer": "return=minimal" },
+      body: JSON.stringify({ user_id: _userId, balance: 0, free_albums: 1, used_free: 0 }),
+    });
+    return await dbCanAddAlbum();
+  }
+  if (bal.used_free < bal.free_albums) {
+    const r = await sbFetch(SB_URL + "/rest/v1/balances?user_id=eq." + _userId, {
+      method: "PATCH",
+      headers: { "Prefer": "return=minimal" },
       body: JSON.stringify({ used_free: bal.used_free + 1, updated_at: new Date().toISOString() }),
     });
+    if (!r.ok) throw new Error("Ошибка обновления баланса: " + r.status);
     return { allowed: true, free: true, remaining: bal.free_albums - bal.used_free - 1 };
   }
   if (bal.balance >= 4) {
@@ -1105,11 +1144,11 @@ function StatsView({ records }) {
 
 // ── AddView ────────────────────────────────────────────────────────────────
 
-function BalanceStatus() {
+function BalanceStatus({ refreshKey }) {
   const [info, setInfo] = useState(null);
   useEffect(() => {
     dbCheckBalance().then(setInfo).catch(() => {});
-  }, []);
+  }, [refreshKey]);
   if (!info) return null;
   if (info.free && info.remaining > 0) return (
     <div style={{ marginBottom: 12, padding: "8px 12px", background: "#0e2a0e", border: "1px solid #1a4a1a", borderRadius: 8, fontSize: 12, color: "#5aaa5a" }}>
@@ -1132,11 +1171,12 @@ function AddView({ onAdded }) {
   const [mode, setMode]       = useState("single"); // "single" | "batch"
 
   // ── Single mode state ────────────────────────────────────────────────
-  const [front, setFront]     = useState(null);
-  const [back,  setBack]      = useState(null);
-  const [busy,  setBusy]      = useState(false);
-  const [step,  setStep]      = useState("");
-  const [err,   setErr]       = useState("");
+  const [front, setFront]       = useState(null);
+  const [back,  setBack]        = useState(null);
+  const [busy,  setBusy]        = useState(false);
+  const [step,  setStep]        = useState("");
+  const [err,   setErr]         = useState("");
+  const [balanceRefresh, setBalanceRefresh] = useState(0);
   const frontRef = useRef(); const backRef = useRef();
 
   // ── Batch mode state ─────────────────────────────────────────────────
@@ -1164,7 +1204,14 @@ function AddView({ onAdded }) {
     setBusy(true); setErr("");
     try {
       setStep("Проверяю баланс...");
-      const check = await dbCanAddAlbum().catch(() => ({ allowed: true, free: true }));
+      let check;
+      try {
+        check = await dbCanAddAlbum();
+      } catch (e) {
+        setErr("Ошибка проверки баланса: " + e.message);
+        setBusy(false);
+        return;
+      }
       if (!check.allowed) {
         setErr("Недостаточно средств. Баланс: ₽" + (check.balance || 0) + ". Пополните баланс во вкладке «₽ Баланс»");
         setBusy(false);
@@ -1188,6 +1235,7 @@ function AddView({ onAdded }) {
       };
       await dbSave(rec).catch(() => window.storage.set(id, JSON.stringify(rec)));
       setFront(null); setBack(null);
+      setBalanceRefresh(k => k + 1);
       onAdded(rec);
     } catch (e) { setErr("Ошибка: " + (e.message||"что-то пошло не так")); }
     setBusy(false); setStep("");
@@ -1294,7 +1342,7 @@ function AddView({ onAdded }) {
       {/* ── Single mode ── */}
       {mode === "single" && (
         <>
-          <BalanceStatus />
+          <BalanceStatus refreshKey={balanceRefresh} />
           <div style={{ fontSize: 13, color: C.muted, marginBottom: 16, lineHeight: 1.6 }}>
             Загрузите фото лицевой и задней стороны.<br />Фон обрежется автоматически, ИИ распознает треки.
           </div>
@@ -1660,8 +1708,9 @@ function AuthScreen({ onAuth }) {
         setMode("login");
       } else {
         const session = await authSignIn(email, pass);
-        try { await window.storage.set("session", JSON.stringify({ token: session.access_token, userId: session.user?.id, email })); } catch {}
-        onAuth({ token: session.access_token, userId: session.user?.id, email });
+        const sessData = { token: session.access_token, refreshToken: session.refresh_token, userId: session.user?.id, email };
+        try { await window.storage.set("session", JSON.stringify(sessData)); } catch {}
+        onAuth(sessData);
       }
     } catch (e) {
       if (e.message === "Failed to fetch") {
@@ -1754,7 +1803,24 @@ function VinylCatalog() {
           const sess = JSON.parse(s.value);
           _token  = sess.token;
           _userId = sess.userId;
-          setUser(sess);
+          // Try to refresh expired token
+          if (sess.refreshToken) {
+            try {
+              const rr = await fetch(SB_URL + "/auth/v1/token?grant_type=refresh_token", {
+                method: "POST",
+                headers: { "apikey": SB_KEY, "Content-Type": "application/json" },
+                body: JSON.stringify({ refresh_token: sess.refreshToken }),
+              });
+              if (rr.ok) {
+                const rd = await rr.json();
+                _token = rd.access_token;
+                _userId = rd.user?.id;
+                const ns = { ...sess, token: rd.access_token, refreshToken: rd.refresh_token, userId: rd.user?.id };
+                await window.storage.set("session", JSON.stringify(ns));
+                setUser(ns);
+              } else { setUser(sess); }
+            } catch { setUser(sess); }
+          } else { setUser(sess); }
         }
       } catch {}
       setAuthLoading(false);
