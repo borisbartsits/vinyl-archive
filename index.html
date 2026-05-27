@@ -827,6 +827,10 @@ function ExportButtons({ records }) {
           style={{ padding: "7px 14px", background: "transparent", border: `1px solid ${isLoading ? C.faint : C.border}`, color: isLoading ? C.faint : C.muted, borderRadius: 6, cursor: isLoading ? "not-allowed" : "pointer", fontFamily: "inherit", fontSize: 12, whiteSpace: "nowrap" }}>
           {isLoading ? pdfStatus : "↓ PDF"}
         </button>
+        <button onClick={() => exportJSON(records)}
+          style={{ padding: "7px 14px", background: "transparent", border: `1px solid ${C.border}`, color: "#5aaa5a", borderRadius: 6, cursor: "pointer", fontFamily: "inherit", fontSize: 12, whiteSpace: "nowrap" }}>
+          ↓ JSON
+        </button>
       </div>
       {isError && (
         <div style={{ fontSize: 10, color: "#e06060", maxWidth: 200, textAlign: "right" }}>
