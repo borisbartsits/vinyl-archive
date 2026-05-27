@@ -23,25 +23,11 @@
   <script type="text/babel">
 const { useState, useEffect, useRef } = React;
 const XLSX = window.XLSX;
-
-// localStorage only for session storage
 window.storage = {
-  set: async (k, v) => {
-    try { localStorage.setItem(k, v); } catch {}
-    return { key: k, value: v };
-  },
-  get: async (k) => {
-    const v = localStorage.getItem(k);
-    return v ? { key: k, value: v } : null;
-  },
-  delete: async (k) => {
-    localStorage.removeItem(k);
-    return { key: k, deleted: true };
-  },
-  list: async (prefix) => {
-    const keys = Object.keys(localStorage).filter(k => !prefix || k.startsWith(prefix));
-    return { keys };
-  }
+  set: async (k,v) => { try{localStorage.setItem(k,v);}catch{} return {key:k,value:v}; },
+  get: async (k) => { const v=localStorage.getItem(k); return v?{key:k,value:v}:null; },
+  delete: async (k) => { localStorage.removeItem(k); return {key:k,deleted:true}; },
+  list: async (prefix) => { const keys=Object.keys(localStorage).filter(k=>!prefix||k.startsWith(prefix)); return {keys}; }
 };
 
 const IN_CLAUDE = (window.self !== window.top);
@@ -128,6 +114,55 @@ async function dbDelete(id) {
   });
   if (!r.ok) throw new Error("DB delete: " + r.status);
 }
+
+async function dbGetBalance() {
+  const r = await fetch(SB_URL + "/rest/v1/balances?select=*&user_id=eq." + _userId, { headers: sbHeaders() });
+  if (!r.ok) return null;
+  const d = await r.json();
+  return d[0] || null;
+}
+
+async function dbGetTransactions() {
+  const r = await fetch(SB_URL + "/rest/v1/transactions?select=*&user_id=eq." + _userId + "&order=created_at.desc&limit=20", { headers: sbHeaders() });
+  if (!r.ok) return [];
+  return await r.json();
+}
+
+async function dbDeductBalance(amount, description, type) {
+  const bal = await dbGetBalance();
+  if (!bal) return false;
+  if (bal.balance < amount) return false;
+  await fetch(SB_URL + "/rest/v1/balances?user_id=eq." + _userId, {
+    method: "PATCH",
+    headers: { ...sbHeaders(), "Prefer": "return=minimal" },
+    body: JSON.stringify({ balance: bal.balance - amount, updated_at: new Date().toISOString() }),
+  });
+  await fetch(SB_URL + "/rest/v1/transactions", {
+    method: "POST",
+    headers: { ...sbHeaders(), "Prefer": "return=minimal" },
+    body: JSON.stringify({ user_id: _userId, type, amount: -amount, description, status: "completed" }),
+  });
+  return true;
+}
+
+async function dbCanAddAlbum() {
+  const bal = await dbGetBalance();
+  if (!bal) return { allowed: true, free: true };
+  if (bal.used_free < bal.free_albums) {
+    await fetch(SB_URL + "/rest/v1/balances?user_id=eq." + _userId, {
+      method: "PATCH",
+      headers: { ...sbHeaders(), "Prefer": "return=minimal" },
+      body: JSON.stringify({ used_free: bal.used_free + 1, updated_at: new Date().toISOString() }),
+    });
+    return { allowed: true, free: true, remaining: bal.free_albums - bal.used_free - 1 };
+  }
+  if (bal.balance >= 4) {
+    await dbDeductBalance(4, "Добавление альбома", "album");
+    return { allowed: true, free: false };
+  }
+  return { allowed: false, free: false, balance: bal.balance };
+}
+
 
 const C = {
   bg: "#13100c", surface: "#1c1710", card: "#252018", cardHover: "#2e2820",
@@ -335,6 +370,47 @@ function exportToExcel(records) {
   XLSX.utils.book_append_sheet(wb, ws, "Vinyl Catalog");
   XLSX.writeFile(wb, "vinyl-catalog.xlsx");
 }
+
+function exportJSON(records) {
+  const data = {
+    version: "1.0",
+    exportedAt: new Date().toISOString(),
+    totalAlbums: records.length,
+    albums: records,
+  };
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "vinyl-archive-backup-" + new Date().toISOString().slice(0,10) + ".json";
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+async function importJSON(file, onImported) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = async (e) => {
+      try {
+        const data = JSON.parse(e.target.result);
+        const albums = data.albums || (Array.isArray(data) ? data : []);
+        if (!albums.length) { reject(new Error("Файл не содержит альбомов")); return; }
+        let imported = 0;
+        for (const rec of albums) {
+          if (!rec.id) rec.id = "vin:" + Date.now() + "_" + imported;
+          try {
+            await window.storage.set(rec.id, JSON.stringify(rec));
+            onImported(rec);
+            imported++;
+          } catch {}
+        }
+        resolve(imported);
+      } catch (e) { reject(new Error("Неверный формат файла")); }
+    };
+    reader.onerror = () => reject(new Error("Не удалось прочитать файл"));
+    reader.readAsText(file);
+  });
+}
+
 
 
 function adjPrice(price, condition) {
@@ -761,6 +837,37 @@ function ExportButtons({ records }) {
   );
 }
 
+
+function ImportSection({ onImported }) {
+  const [importing, setImporting] = useState(false);
+  const [result, setResult]       = useState("");
+  const inputRef = useRef();
+
+  const handleFile = async (file) => {
+    if (!file) return;
+    setImporting(true); setResult("");
+    try {
+      const count = await importJSON(file, onImported);
+      setResult("✓ Импортировано " + count + " альбомов");
+    } catch (e) {
+      setResult("✕ " + e.message);
+    }
+    setImporting(false);
+  };
+
+  return (
+    <div style={{ marginTop: 10 }}>
+      <button onClick={() => inputRef.current?.click()} disabled={importing}
+        style={{ width: "100%", padding: "12px", background: C.surface, border: `1px solid ${C.border}`, color: C.muted, borderRadius: 8, cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: "bold" }}>
+        {importing ? "Импортирую..." : "↑ Восстановить из резервной копии"}
+      </button>
+      <input ref={inputRef} type="file" accept=".json" style={{ display: "none" }}
+        onChange={e => handleFile(e.target.files[0])} />
+      {result && <div style={{ marginTop: 8, fontSize: 12, color: result.startsWith("✓") ? "#5aaa5a" : C.dangerText, textAlign: "center" }}>{result}</div>}
+    </div>
+  );
+}
+
 function StatsView({ records }) {
   const genres = {};
   const decades = {};
@@ -860,16 +967,21 @@ function StatsView({ records }) {
       )}
 
       {/* Export */}
-      <div style={{ display: "flex", gap: 10 }}>
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
         <button onClick={() => exportToExcel(records)}
-          style={{ flex: 1, padding: "12px", background: C.surface, border: `1px solid ${C.border}`, color: C.text, borderRadius: 8, cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: "bold" }}>
-          ↓ Excel (.xlsx)
+          style={{ flex: 1, padding: "12px", background: C.surface, border: `1px solid ${C.border}`, color: C.text, borderRadius: 8, cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: "bold", minWidth: 120 }}>
+          ↓ Excel
         </button>
         <button onClick={() => exportToPDF(records, () => {})}
-          style={{ flex: 1, padding: "12px", background: C.surface, border: `1px solid ${C.border}`, color: C.text, borderRadius: 8, cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: "bold" }}>
-          ↓ PDF (с фото)
+          style={{ flex: 1, padding: "12px", background: C.surface, border: `1px solid ${C.border}`, color: C.text, borderRadius: 8, cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: "bold", minWidth: 120 }}>
+          ↓ PDF
+        </button>
+        <button onClick={() => exportJSON(records)}
+          style={{ flex: 1, padding: "12px", background: C.surface, border: `1px solid ${C.border}`, color: "#5aaa5a", borderRadius: 8, cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: "bold", minWidth: 120 }}>
+          ↓ Резервная копия
         </button>
       </div>
+      <ImportSection onImported={rec => { setRecords(p => [...p, rec].sort((a,b) => (a.artist||"").localeCompare(b.artist||""))); }} />
     </div>
   );
 }
@@ -1190,6 +1302,96 @@ function AddView({ onAdded }) {
 }
 
 
+
+function BalanceView({ onClose }) {
+  const [bal,  setBal]   = useState(null);
+  const [txns, setTxns]  = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [topupOpen, setTopupOpen] = useState(false);
+
+  useEffect(() => {
+    Promise.all([dbGetBalance(), dbGetTransactions()]).then(([b, t]) => {
+      setBal(b); setTxns(t); setLoading(false);
+    });
+  }, []);
+
+  const AMOUNTS = [100, 200, 500, 1000];
+
+  if (loading) return (
+    <div style={{ padding: 40, textAlign: "center", color: C.muted }}>Загрузка...</div>
+  );
+
+  return (
+    <div style={{ maxWidth: 480, margin: "0 auto", padding: "24px" }}>
+      <button onClick={onClose} style={{ marginBottom: 20, padding: "7px 16px", background: "transparent", border: `1px solid ${C.border}`, color: C.muted, borderRadius: 6, cursor: "pointer", fontFamily: "inherit", fontSize: 13 }}>
+        ← Назад
+      </button>
+
+      {/* Balance card */}
+      <div style={{ background: "linear-gradient(135deg,#1e1a10 0%,#252018 100%)", border: `1px solid #4a3a1a`, borderRadius: 12, padding: "20px", marginBottom: 16 }}>
+        <div style={{ fontSize: 10, color: C.muted, textTransform: "uppercase", letterSpacing: "0.12em", marginBottom: 6 }}>Мой баланс</div>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 16 }}>
+          <span style={{ fontSize: 36, fontWeight: "bold", color: C.accent }}>₽ {bal?.balance || 0}</span>
+          <span style={{ fontSize: 12, color: C.muted }}>доступно</span>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 16 }}>
+          {[
+            ["Пластинок", bal ? bal.used_free + (bal.balance > 0 ? Math.floor(bal.balance / 4) : 0) : 0, C.text],
+            ["Бесплатных", bal?.free_albums || 50, "#5aaa5a"],
+            ["Использовано", bal?.used_free || 0, C.accent],
+          ].map(([label, val, color]) => (
+            <div key={label} style={{ background: C.card, borderRadius: 8, padding: "10px 8px", textAlign: "center" }}>
+              <div style={{ fontSize: 20, fontWeight: "bold", color, lineHeight: 1 }}>{val}</div>
+              <div style={{ fontSize: 9, color: C.muted, marginTop: 3 }}>{label}</div>
+            </div>
+          ))}
+        </div>
+        <button onClick={() => setTopupOpen(!topupOpen)}
+          style={{ width: "100%", padding: "12px", background: C.accent, border: "none", borderRadius: 8, color: C.bg, fontSize: 14, fontFamily: "inherit", fontWeight: "bold", cursor: "pointer" }}>
+          {topupOpen ? "Скрыть" : "Пополнить баланс"}
+        </button>
+      </div>
+
+      {/* Topup section */}
+      {topupOpen && (
+        <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16, marginBottom: 16 }}>
+          <div style={{ fontSize: 11, color: C.muted, textTransform: "uppercase", letterSpacing: "0.12em", marginBottom: 12 }}>Пополнение через СБП · РНКО Монета</div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 14 }}>
+            {AMOUNTS.map(amt => (
+              <button key={amt} style={{ padding: "11px", background: C.card, border: `1px solid ${C.border}`, borderRadius: 8, color: C.text, fontSize: 13, fontFamily: "inherit", cursor: "pointer" }}>
+                ₽ {amt}
+              </button>
+            ))}
+          </div>
+          <div style={{ background: C.card, borderRadius: 8, padding: 16, textAlign: "center", marginBottom: 10 }}>
+            <div style={{ fontSize: 13, color: C.muted, marginBottom: 8 }}>QR код появится здесь после подключения РНКО Монета</div>
+            <div style={{ width: 100, height: 100, background: C.faint, borderRadius: 8, margin: "0 auto", display: "flex", alignItems: "center", justifyContent: "center", color: C.muted, fontSize: 11 }}>QR</div>
+          </div>
+          <div style={{ fontSize: 10, color: C.muted, textAlign: "center" }}>Интеграция с платёжной системой в разработке</div>
+        </div>
+      )}
+
+      {/* Transactions */}
+      <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16 }}>
+        <div style={{ fontSize: 11, color: C.muted, textTransform: "uppercase", letterSpacing: "0.12em", marginBottom: 12 }}>История операций</div>
+        {txns.length === 0 ? (
+          <div style={{ color: C.muted, fontSize: 13, textAlign: "center", padding: "20px 0" }}>Операций пока нет</div>
+        ) : txns.map((t, i) => (
+          <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: i < txns.length-1 ? `1px solid ${C.faint}` : "none" }}>
+            <div>
+              <div style={{ fontSize: 12, color: C.text }}>{t.description}</div>
+              <div style={{ fontSize: 10, color: C.muted }}>{new Date(t.created_at).toLocaleDateString("ru-RU", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}</div>
+            </div>
+            <span style={{ fontSize: 13, fontWeight: "bold", color: t.amount > 0 ? "#5aaa5a" : "#e06060" }}>
+              {t.amount > 0 ? "+" : ""}{t.amount} ₽
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // ── AuthScreen ─────────────────────────────────────────────────────────────
 function AuthScreen({ onAuth }) {
   const [mode,  setMode]  = useState("login"); // login | register
@@ -1438,6 +1640,7 @@ function VinylCatalog() {
           {navBtn("catalog", `Каталог (${records.length})`)}
           {navBtn("stats",   "Статистика")}
           {navBtn("add",     "+ Добавить")}
+          {navBtn("balance", "₽ Баланс")}
           <div style={{ width: 1, height: 20, background: C.border }} />
           <ExportButtons records={records} />
           <div style={{ width: 1, height: 20, background: C.border }} />
@@ -1489,6 +1692,9 @@ function VinylCatalog() {
 
       {/* Stats */}
       {tab === "stats" && <StatsView records={records} />}
+
+      {/* Balance */}
+      {tab === "balance" && <BalanceView onClose={() => setTab("catalog")} />}
 
       {/* Add */}
       {tab === "add" && <AddView onAdded={rec => { setRecords(p => [...p, rec].sort((a,b) => (a.artist||"").localeCompare(b.artist||""))); setTab("catalog"); setDetail(rec); }} />}
