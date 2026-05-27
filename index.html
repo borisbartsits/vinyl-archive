@@ -23,11 +23,25 @@
   <script type="text/babel">
 const { useState, useEffect, useRef } = React;
 const XLSX = window.XLSX;
+
+// localStorage only for session storage
 window.storage = {
-  set: async (k,v) => { try{localStorage.setItem(k,v);}catch{} return {key:k,value:v}; },
-  get: async (k) => { const v=localStorage.getItem(k); return v?{key:k,value:v}:null; },
-  delete: async (k) => { localStorage.removeItem(k); return {key:k,deleted:true}; },
-  list: async (prefix) => { const keys=Object.keys(localStorage).filter(k=>!prefix||k.startsWith(prefix)); return {keys}; }
+  set: async (k, v) => {
+    try { localStorage.setItem(k, v); } catch {}
+    return { key: k, value: v };
+  },
+  get: async (k) => {
+    const v = localStorage.getItem(k);
+    return v ? { key: k, value: v } : null;
+  },
+  delete: async (k) => {
+    localStorage.removeItem(k);
+    return { key: k, deleted: true };
+  },
+  list: async (prefix) => {
+    const keys = Object.keys(localStorage).filter(k => !prefix || k.startsWith(prefix));
+    return { keys };
+  }
 };
 
 const IN_CLAUDE = (window.self !== window.top);
