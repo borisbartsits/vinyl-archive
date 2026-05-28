@@ -823,7 +823,6 @@ function AlbumCard({ record, onClick }) {
           <div style={{ fontSize: 9, color: C.muted, marginTop: 3, fontFamily: C.fMono }}>{[record.year, record.genre].filter(Boolean).join(" · ") || " "}</div>
           {p && <div style={{ marginTop: 5, fontSize: 10, color: "#6dbf6d", fontFamily: C.fMono }}>${p.low}–${p.high}</div>}
         </div>
-      )}
     </div>
   );
 }
