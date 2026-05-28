@@ -728,8 +728,7 @@ function CollectionValue({ records }) {
 }
 
 // ── AlbumCard ──────────────────────────────────────────────────────────────
-
-function FeatureSlider({ records, onSelect }) {
+) {
   const [idx, setIdx] = useState(0);
   const [fade, setFade] = useState(true);
   const withImg = records.filter(r => r.thumb || r.thumbFront);
@@ -2263,7 +2262,6 @@ function VinylCatalog() {
               ) : hits.length === 0 ? (
                 <div style={{ textAlign:"center", padding:"60px 0", color:C.muted }}>Ничего не найдено</div>
               ) : (
-                <FeatureSlider records={hits} onSelect={setDetail} />
                 <div className="fade-up" style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(150px,1fr))", gap:14 }}>
                   {hits.map((r) => <AlbumCard key={r.id} record={r} onClick={setDetail} />)}
                 </div>
