@@ -20,8 +20,10 @@
     #splash{position:fixed;inset:0;background:#0D1B2A;display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:9999}
     .sp-ring{width:52px;height:52px;border:2px solid #1e3d58;border-top-color:#C8A96E;border-radius:50%;animation:spin .9s linear infinite;margin-bottom:18px}
     @keyframes spin{to{transform:rotate(360deg)}}
-    #errmsg{position:fixed;inset:0;background:#0D1B2A;display:none;color:#e08080;font:12px monospace;padding:20px;overflow:auto;white-space:pre-wrap;z-index:9999}
+    @keyframes fade-up{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+    .fade-up{animation:fade-up 0.4s ease forwards}
     @keyframes vinyl-spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+    #errmsg{position:fixed;inset:0;background:#0D1B2A;display:none;color:#e08080;font:12px monospace;padding:20px;overflow:auto;white-space:pre-wrap;z-index:9999}
   </style>
 </head>
 <body>
@@ -2179,29 +2181,11 @@ function VinylCatalog() {
   return (
     <div style={{ fontFamily: C.fBody, background: C.bg, minHeight: "100vh", color: C.text, position: "relative" }}>
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;1,400&family=DM+Mono:wght@300;400;500&display=swap');
-        * { box-sizing: border-box; }
-        body::before {
-          content: '';
-          position: fixed; inset: 0;
-          background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");
-          pointer-events: none; z-index: 9998; opacity: 0.35;
-        }
-        .wave-line {
-          animation: wave-drift 4s ease-in-out infinite;
-        }
-        @keyframes wave-drift {
-          0%, 100% { d: path('M 0 12 C 15 4, 30 4, 45 12 C 60 20, 75 20, 90 12'); }
-          50% { d: path('M 0 8 C 15 16, 30 16, 45 8 C 60 0, 75 0, 90 8'); }
-        }
         @keyframes fade-up {
           from { opacity: 0; transform: translateY(12px); }
           to   { opacity: 1; transform: translateY(0); }
         }
         .fade-up { animation: fade-up 0.4s ease forwards; }
-        .fade-up-1 { animation: fade-up 0.4s 0.05s ease both; }
-        .fade-up-2 { animation: fade-up 0.4s 0.10s ease both; }
-        .fade-up-3 { animation: fade-up 0.4s 0.15s ease both; }
       `}</style>
       {/* Header */}
       <div style={{ background: C.surface, borderBottom: `1px solid ${C.border}`, padding: "12px 20px", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8, position: "sticky", top: 0, zIndex: 100, backdropFilter: "blur(12px)" }}>
