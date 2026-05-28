@@ -9,7 +9,6 @@
   <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;1,400&family=DM+Mono:wght@300;400;500&display=swap" rel="stylesheet"/>
   <link rel="manifest" href="manifest.json"/>
   <meta name="theme-color" content="#0D1B2A"/>
-  <meta name="description" content="Каждая твоя пластинка заслуживает быть оцифрованной."/>
   <meta name="apple-mobile-web-app-capable" content="yes"/>
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
   <meta name="apple-mobile-web-app-title" content="vinyldarksea"/>
@@ -729,7 +728,63 @@ function CollectionValue({ records }) {
 }
 
 // ── AlbumCard ──────────────────────────────────────────────────────────────
-function AlbumCard({ record, onClick, feature }) {
+
+function FeatureSlider({ records, onSelect }) {
+  const [idx, setIdx] = useState(0);
+  const [fade, setFade] = useState(true);
+  const withImg = records.filter(r => r.thumb || r.thumbFront);
+  
+  useEffect(() => {
+    if (withImg.length < 2) return;
+    const timer = setInterval(() => {
+      setFade(false);
+      setTimeout(() => {
+        setIdx(i => (i + 1) % withImg.length);
+        setFade(true);
+      }, 300);
+    }, 10000);
+    return () => clearInterval(timer);
+  }, [withImg.length]);
+
+  if (!withImg.length) return null;
+  const rec = withImg[idx % withImg.length];
+  const p = rec.price ? adjPrice(rec.price, rec.condition) : null;
+
+  return (
+    <div onClick={() => onSelect(rec)} style={{ marginBottom: 14, borderRadius: 12, overflow: "hidden", cursor: "pointer", position: "relative", aspectRatio: "21/9" }}>
+      <img
+        src={rec.thumbFront || rec.thumb}
+        alt={rec.album}
+        style={{
+          width: "100%", height: "100%", objectFit: "cover", background: "#060e18",
+          opacity: fade ? 1 : 0,
+          transition: "opacity 0.3s ease",
+          display: "block",
+        }}
+      />
+      <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, padding: "32px 16px 12px",
+        background: "linear-gradient(transparent, rgba(13,27,42,0.97))",
+        opacity: fade ? 1 : 0, transition: "opacity 0.3s ease" }}>
+        <div style={{ fontSize: 18, color: "#EDE8DC", fontFamily: "'Playfair Display',Georgia,serif", fontStyle: "italic", marginBottom: 3 }}>{rec.album}</div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div style={{ fontSize: 11, color: "#C8A96E", fontFamily: "'DM Mono',monospace", letterSpacing: "0.06em" }}>{rec.artist}</div>
+          {p && <div style={{ fontSize: 11, color: "#6dbf6d", fontFamily: "'DM Mono',monospace" }}>${p.low}–${p.high}</div>}
+        </div>
+      </div>
+      {/* Dots */}
+      {withImg.length > 1 && (
+        <div style={{ position: "absolute", bottom: 8, left: "50%", transform: "translateX(-50%)", display: "flex", gap: 5 }}>
+          {withImg.map((_, i) => (
+            <div key={i} onClick={e => { e.stopPropagation(); setFade(false); setTimeout(() => { setIdx(i); setFade(true); }, 300); }}
+              style={{ width: i === idx ? 16 : 6, height: 6, borderRadius: 3, background: i === idx ? "#C8A96E" : "rgba(255,255,255,0.3)", transition: "all 0.3s", cursor: "pointer" }} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AlbumCard({ record, onClick }) {
   const [hov, setHov] = useState(false);
   const p = record.price ? adjPrice(record.price, record.condition) : null;
   return (
@@ -744,32 +799,24 @@ function AlbumCard({ record, onClick, feature }) {
         cursor: "pointer",
         transition: "transform 0.2s cubic-bezier(.34,1.56,.64,1), border-color 0.15s",
         transform: hov ? "translateY(-3px) rotate(0.4deg)" : "none",
-        gridColumn: feature ? "1 / -1" : undefined,
+
       }}>
       <div style={{
-        aspectRatio: feature ? "21/9" : "1",
+        aspectRatio: "1",
         background: C.surface,
         overflow: "hidden",
         position: "relative",
       }}>
         {(record.thumb || record.thumbFront)
           ? <img src={record.thumb || record.thumbFront} alt={record.album}
-              style={{ width: "100%", height: "100%", objectFit: feature ? "cover" : "contain", background: "#060e18",
+              style={{ width: "100%", height: "100%", objectFit: "contain", background: "#060e18",
                 transition: "transform 0.3s ease", transform: hov ? "scale(1.04)" : "scale(1)" }} />
           : <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}>
               <LogoMark size={feature ? 80 : 48} />
             </div>}
         {record.condition && <div style={{ position: "absolute", top: 7, right: 7 }}><ConditionBadge condition={record.condition} small /></div>}
-        {feature && p && (
-          <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, padding: "24px 16px 10px",
-            background: "linear-gradient(transparent, rgba(13,27,42,0.95))" }}>
-            <div style={{ fontSize: 18, color: C.text, fontFamily: C.fDisplay, marginBottom: 2 }}>{record.album}</div>
-            <div style={{ fontSize: 12, color: C.accent, fontFamily: C.fMono, letterSpacing: "0.06em" }}>{record.artist}</div>
-          </div>
-        )}
       </div>
-      {!feature && (
-        <div style={{ padding: "10px 12px 12px" }}>
+      <div style={{ padding: "10px 12px 12px" }}>
           <div style={{ fontSize: 12, fontFamily: C.fDisplay, color: C.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", lineHeight: 1.3 }}>{record.album}</div>
           <div style={{ fontSize: 10, color: C.accent, fontFamily: C.fMono, marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", letterSpacing: "0.04em" }}>{record.artist}</div>
           <div style={{ fontSize: 9, color: C.muted, marginTop: 3, fontFamily: C.fMono }}>{[record.year, record.genre].filter(Boolean).join(" · ") || " "}</div>
@@ -2216,8 +2263,9 @@ function VinylCatalog() {
               ) : hits.length === 0 ? (
                 <div style={{ textAlign:"center", padding:"60px 0", color:C.muted }}>Ничего не найдено</div>
               ) : (
+                <FeatureSlider records={hits} onSelect={setDetail} />
                 <div className="fade-up" style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(150px,1fr))", gap:14 }}>
-                  {hits.map((r, i) => <AlbumCard key={r.id} record={r} onClick={setDetail} feature={i === 0 && hits.length > 2} />)}
+                  {hits.map((r) => <AlbumCard key={r.id} record={r} onClick={setDetail} />)}
                 </div>
               )}
             </>
