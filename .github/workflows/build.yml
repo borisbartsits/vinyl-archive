@@ -1,0 +1,30 @@
+name: Build & Deploy
+
+on:
+  push:
+    paths:
+      - 'vinyl-catalog.jsx'
+      - 'build.py'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build index.html
+        run: python3 build.py
+
+      - name: Commit & Push
+        run: |
+          git config user.email "bot@vinyldarksea.ru"
+          git config user.name "vinyldarksea bot"
+          git add index.html icon.svg
+          git diff --staged --quiet && echo "No changes" || (git commit -m "Auto-build index.html" && git push)
