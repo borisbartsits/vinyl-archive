@@ -94,7 +94,7 @@ async function authSignOut() {
 }
 
 async function dbGetAll() {
-  const r = await fetch(SB_URL + "/rest/v1/albums?select=*&order=artist.asc", { headers: sbHeaders() });
+  const r = await fetch(SB_URL + "/rest/v1/albums?select=*&user_id=eq." + _userId + "&order=artist.asc", { headers: sbHeaders() });
   if (!r.ok) throw new Error("DB read: " + r.status);
   const rows = await r.json();
   return rows.map(row => ({
@@ -125,7 +125,7 @@ async function dbSave(rec) {
 }
 
 async function dbDelete(id) {
-  const r = await fetch(SB_URL + "/rest/v1/albums?id=eq." + encodeURIComponent(id), {
+  const r = await fetch(SB_URL + "/rest/v1/albums?id=eq." + encodeURIComponent(id) + "&user_id=eq." + _userId, {
     method: "DELETE", headers: sbHeaders(),
   });
   if (!r.ok) throw new Error("DB delete: " + r.status);
