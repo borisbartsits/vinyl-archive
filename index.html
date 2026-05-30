@@ -114,7 +114,7 @@ async function dbSave(rec) {
     price: rec.price || null, notes: rec.notes || null,
     thumb: rec.thumb || null, thumb_front: rec.thumbFront || rec.thumb || null,
     thumb_back: rec.thumbBack || null, at: rec.at || new Date().toISOString(),
-    user_id: _userId,
+    user_id: _userId, is_public: rec.is_public || false,
   };
   const r = await fetch(SB_URL + "/rest/v1/albums", {
     method: "POST",
@@ -1447,7 +1447,7 @@ function AddView({ onAdded, onBatchProgress }) {
           ...(price ? { price } : {}),
         };
         await dbSave(rec).catch(() => window.storage.set(id, JSON.stringify(rec)));
-        onAdded(rec);
+        onAdded(rec, true); // true = batch, не переключать таб
         done.push(rec);
         setBalanceRefresh(r => r + 1); // обновить отображение баланса
       } catch (e) {
@@ -2840,14 +2840,19 @@ function VinylCatalog() {
       )}
 
       {/* Add */}
-      {tab === "add" && <AddView onAdded={rec => { setRecords(p => [...p, rec].sort((a,b) => (a.artist||"").localeCompare(b.artist||""))); setTab("catalog"); setDetail(rec); }} onBatchProgress={setBatchProgress} />}
+      {tab === "add" && <AddView
+          onAdded={(rec, isBatch) => {
+            setRecords(p => [...p, rec].sort((a,b) => (a.artist||"").localeCompare(b.artist||"")));
+            if (!isBatch) { setTab("catalog"); setDetail(rec); }
+          }}
+          onBatchProgress={setBatchProgress} />}
 
       {/* Глобальный баннер прогресса батча — виден на любой вкладке */}
       {batchProgress && (
         <div style={{
-          position: "fixed", bottom: 0, left: 0, right: 0, zIndex: 9999,
-          background: "#1a1500", borderTop: "2px solid #C8A96E",
-          padding: "12px 20px", boxShadow: "0 -4px 20px rgba(0,0,0,0.5)"
+          position: "fixed", bottom: 80, left: 0, right: 0, zIndex: 9999,
+          background: "#1a1500", border: "1px solid #C8A96E", borderRadius: "12px 12px 0 0",
+          padding: "12px 20px", boxShadow: "0 -4px 20px rgba(0,0,0,0.7)", margin: "0 8px"
         }}>
           <div style={{ maxWidth: 640, margin: "0 auto" }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
