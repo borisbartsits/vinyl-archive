@@ -1287,7 +1287,7 @@ function BalanceStatus({ refreshKey }) {
   );
 }
 
-function AddView({ onAdded }) {
+function AddView({ onAdded, onBatchProgress }) {
   const [mode, setMode]       = useState("single"); // "single" | "batch"
 
   // ── Single mode state ────────────────────────────────────────────────
@@ -1406,6 +1406,7 @@ function AddView({ onAdded }) {
     if (!pairs.length || batchRun) return;
     console.log("[BATCH] Start, pairs:", pairs.length);
     setBatchRun(true);
+    if (onBatchProgress) onBatchProgress({ idx: 0, total: pairs.length, done: 0, errs: 0, cooldown: 0 });
     await new Promise(r => setTimeout(r, 50)); // flush render
     const done = []; const errs = [];
     for (let i = 0; i < pairs.length; i++) {
@@ -1454,11 +1455,13 @@ function AddView({ onAdded }) {
         errs.push({ i, msg: e.message || "ошибка" });
       }
       setBatchDone([...done]); setBatchErr([...errs]);
+      if (onBatchProgress) onBatchProgress({ idx: i, total: pairs.length, done: done.length, errs: errs.length, cooldown: 0 });
       // Пауза с обратным отсчётом
       if (i < pairs.length - 1) {
         const WAIT = 6;
         for (let s = WAIT; s > 0; s--) {
           setBatchCooldown(s);
+          if (onBatchProgress) onBatchProgress({ idx: i, total: pairs.length, done: done.length, errs: errs.length, cooldown: s });
           await new Promise(r => setTimeout(r, 1000));
         }
         setBatchCooldown(0);
@@ -1468,6 +1471,7 @@ function AddView({ onAdded }) {
     setBatchIdx(-1);
     setBatchCooldown(0);
     setBalanceRefresh(r => r + 1);
+    if (onBatchProgress) onBatchProgress(null);
   };
 
   const resetBatch = () => {
@@ -2478,6 +2482,7 @@ function VinylCatalog() {
   const [user,    setUser]    = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [tab,     setTab]     = useState("catalog");
+  const [batchProgress, setBatchProgress] = useState(null); // {idx, total, done, errs, cooldown}
   const [records, setRecords] = useState([]);
   const [loading, setLoading] = useState(true);
   const [dbOk,    setDbOk]    = useState(null);
@@ -2835,7 +2840,35 @@ function VinylCatalog() {
       )}
 
       {/* Add */}
-      {tab === "add" && <AddView onAdded={rec => { setRecords(p => [...p, rec].sort((a,b) => (a.artist||"").localeCompare(b.artist||""))); setTab("catalog"); setDetail(rec); }} />}
+      {tab === "add" && <AddView onAdded={rec => { setRecords(p => [...p, rec].sort((a,b) => (a.artist||"").localeCompare(b.artist||""))); setTab("catalog"); setDetail(rec); }} onBatchProgress={setBatchProgress} />}
+
+      {/* Глобальный баннер прогресса батча — виден на любой вкладке */}
+      {batchProgress && (
+        <div style={{
+          position: "fixed", bottom: 0, left: 0, right: 0, zIndex: 9999,
+          background: "#1a1500", borderTop: "2px solid #C8A96E",
+          padding: "12px 20px", boxShadow: "0 -4px 20px rgba(0,0,0,0.5)"
+        }}>
+          <div style={{ maxWidth: 640, margin: "0 auto" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+              <span style={{ fontSize: 13, fontWeight: "bold", color: "#f0e2c0" }}>
+                {batchProgress.cooldown > 0
+                  ? `⏱ Следующий через ${batchProgress.cooldown}с...`
+                  : `⟳ Обрабатываю ${batchProgress.idx + 1} из ${batchProgress.total}...`}
+              </span>
+              <span style={{ fontSize: 12, color: "#C8A96E" }}>
+                {Math.round(((batchProgress.idx) / batchProgress.total) * 100)}%
+              </span>
+            </div>
+            <div style={{ height: 6, background: "#2a2000", borderRadius: 3, overflow: "hidden" }}>
+              <div style={{ height: "100%", borderRadius: 3, background: "#C8A96E", width: `${Math.round((batchProgress.idx / batchProgress.total) * 100)}%`, transition: "width 0.5s" }} />
+            </div>
+            <div style={{ fontSize: 11, color: "#8a7454", marginTop: 6 }}>
+              ✓ {batchProgress.done} добавлено · ✕ {batchProgress.errs} ошибок · осталось {batchProgress.total - batchProgress.idx - 1}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
