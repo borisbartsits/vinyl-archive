@@ -1405,6 +1405,19 @@ function AddView({ onAdded }) {
       setBatchIdx(i);
       const pair = pairs[i];
       if (!pair.back) { errs.push({ i, msg: "Нет задней стороны" }); continue; }
+      // Проверка и списание баланса перед каждым альбомом
+      try {
+        const charge = await checkAndCharge();
+        if (!charge.allowed) {
+          errs.push({ i, msg: `Недостаточно средств (₽${charge.balance || 0}). Пополните баланс.` });
+          setBatchDone([...done]); setBatchErr([...errs]);
+          continue;
+        }
+      } catch (e) {
+        errs.push({ i, msg: "Ошибка проверки баланса: " + (e.message || "") });
+        setBatchDone([...done]); setBatchErr([...errs]);
+        continue;
+      }
       try {
         const [thumbFront, thumbBack] = await Promise.all([
           smartCropToB64(pair.front),
@@ -1428,6 +1441,8 @@ function AddView({ onAdded }) {
         errs.push({ i, msg: e.message || "ошибка" });
       }
       setBatchDone([...done]); setBatchErr([...errs]);
+      // Пауза между запросами чтобы не словить rate limit
+      if (i < pairs.length - 1) await new Promise(r => setTimeout(r, 1500));
     }
     setBatchRun(false);
     setBatchIdx(-1);
@@ -1568,7 +1583,7 @@ function AddView({ onAdded }) {
                           {/* Status */}
                           <div style={{ minWidth: 24, textAlign: "center" }}>
                             {isActive && <div style={{ fontSize: 16, color: C.accent }}>⟳</div>}
-                            {isErr    && <div style={{ fontSize: 14, color: C.dangerText }}>✕</div>}
+                            {isErr    && <div><div style={{ fontSize: 14, color: C.dangerText }}>✕</div><div style={{ fontSize: 9, color: C.dangerText, maxWidth: 60, wordBreak: "break-word", marginTop: 2 }}>{isErr.msg}</div></div>}
                             {!isActive && !isErr && batchIdx > i && <div style={{ fontSize: 14, color: "#5aaa5a" }}>✓</div>}
                           </div>
                           {/* Remove */}
@@ -1613,8 +1628,11 @@ function AddView({ onAdded }) {
                     {batchDone.length > 0 && `Добавлено: ${batchDone.length} ${batchDone.length===1?"альбом":batchDone.length<5?"альбома":"альбомов"}`}
                   </div>
                   {batchErr.length > 0 && (
-                    <div style={{ fontSize: 13, color: C.dangerText, marginBottom: 12 }}>
-                      Ошибок: {batchErr.length}
+                    <div style={{ fontSize: 13, color: C.dangerText, marginBottom: 12, textAlign: "left", background: "#1a0a0a", borderRadius: 8, padding: "10px 14px" }}>
+                      <div style={{ fontWeight: "bold", marginBottom: 6 }}>Ошибки ({batchErr.length}):</div>
+                      {batchErr.map((e, i) => (
+                        <div key={i} style={{ marginBottom: 4 }}>Пара {e.i+1}: {e.msg}</div>
+                      ))}
                     </div>
                   )}
                   <button onClick={resetBatch}
