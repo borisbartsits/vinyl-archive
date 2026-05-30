@@ -1403,22 +1403,28 @@ function AddView({ onAdded }) {
 
   const runBatch = async () => {
     if (!pairs.length || batchRun) return;
+    console.log("[BATCH] Start, pairs:", pairs.length);
     setBatchRun(true);
+    await new Promise(r => setTimeout(r, 50)); // flush render
     const done = []; const errs = [];
     for (let i = 0; i < pairs.length; i++) {
       setBatchIdx(i);
+      await new Promise(r => setTimeout(r, 30)); // flush render
       const pair = pairs[i];
       if (!pair.back) { errs.push({ i, msg: "Нет задней стороны" }); continue; }
       // Проверка и списание баланса перед каждым альбомом
       try {
+        console.log("[BATCH] Checking balance for album", i+1);
         const charge = await dbCanAddAlbum();
+        console.log("[BATCH] Balance check result:", JSON.stringify(charge));
         if (!charge.allowed) {
           errs.push({ i, msg: `Недостаточно средств (₽${charge.balance || 0}). Пополните баланс.` });
           setBatchDone([...done]); setBatchErr([...errs]);
           continue;
         }
       } catch (e) {
-        errs.push({ i, msg: "Ошибка проверки баланса: " + (e.message || "") });
+        console.error("[BATCH] Balance error for album", i+1, e.message);
+        errs.push({ i, msg: "Ошибка баланса: " + (e.message || "") });
         setBatchDone([...done]); setBatchErr([...errs]);
         continue;
       }
@@ -1442,6 +1448,7 @@ function AddView({ onAdded }) {
         onAdded(rec);
         done.push(rec);
       } catch (e) {
+        console.error("[BATCH] Claude error for album", i+1, e.message);
         errs.push({ i, msg: e.message || "ошибка" });
       }
       setBatchDone([...done]); setBatchErr([...errs]);
