@@ -230,18 +230,22 @@ async function dbGetTransactions() {
 
 async function dbDeductBalance(amount, description, type) {
   const bal = await dbGetBalance();
-  if (!bal) return false;
-  if (bal.balance < amount) return false;
-  await fetch(SB_URL + "/rest/v1/balances?user_id=eq." + _userId, {
+  if (!bal) throw new Error("Баланс не найден");
+  if (bal.balance < amount) throw new Error("Недостаточно средств (₽" + bal.balance + ")");
+  const r1 = await sbFetch(SB_URL + "/rest/v1/balances?user_id=eq." + _userId, {
     method: "PATCH",
-    headers: { ...sbHeaders(), "Prefer": "return=minimal" },
+    headers: { "Prefer": "return=minimal" },
     body: JSON.stringify({ balance: bal.balance - amount, updated_at: new Date().toISOString() }),
   });
-  await fetch(SB_URL + "/rest/v1/transactions", {
+  if (!r1.ok) {
+    const t = await r1.text().catch(() => "");
+    throw new Error("Ошибка списания баланса: " + r1.status + " " + t.slice(0, 100));
+  }
+  await sbFetch(SB_URL + "/rest/v1/transactions", {
     method: "POST",
-    headers: { ...sbHeaders(), "Prefer": "return=minimal" },
+    headers: { "Prefer": "return=minimal" },
     body: JSON.stringify({ user_id: _userId, type, amount: -amount, description, status: "completed" }),
-  });
+  }).catch(() => {});
   return true;
 }
 
@@ -1541,6 +1545,22 @@ function AddView({ onAdded }) {
                     </button>
                   </div>
 
+                  {/* Progress bar — всегда виден вверху */}
+                  {batchRun && (
+                    <div style={{ background: C.card, border: `1px solid ${C.accent}`, borderRadius: 10, padding: "12px 16px", marginBottom: 14 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: C.text, marginBottom: 8, fontWeight: "bold" }}>
+                        <span>⟳ Обрабатываю {batchIdx + 1} из {pairs.length}...</span>
+                        <span style={{ color: C.accent }}>{Math.round((batchIdx / pairs.length) * 100)}%</span>
+                      </div>
+                      <div style={{ height: 8, background: C.faint, borderRadius: 4, overflow: "hidden" }}>
+                        <div style={{ height: "100%", borderRadius: 4, background: C.accent, width: `${Math.round((batchIdx / pairs.length) * 100)}%`, transition: "width 0.5s" }} />
+                      </div>
+                      <div style={{ fontSize: 11, color: C.muted, marginTop: 6 }}>
+                        ✓ {batchDone.length} добавлено · ✕ {batchErr.length} ошибок · осталось {pairs.length - batchIdx - 1}
+                      </div>
+                    </div>
+                  )}
+
                   {/* Pairs grid */}
                   <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 20 }}>
                     {pairs.map((pair, i) => {
@@ -1597,22 +1617,6 @@ function AddView({ onAdded }) {
                       );
                     })}
                   </div>
-
-                  {/* Progress bar */}
-                  {batchRun && (
-                    <div style={{ position: "sticky", top: 0, zIndex: 10, background: C.bg, padding: "10px 0 14px", marginBottom: 10, borderBottom: `1px solid ${C.border}` }}>
-                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: C.text, marginBottom: 8, fontWeight: "bold" }}>
-                        <span>⟳ Обрабатываю {batchIdx + 1} из {pairs.length}...</span>
-                        <span style={{ color: C.accent }}>{Math.round(((batchIdx) / pairs.length) * 100)}%</span>
-                      </div>
-                      <div style={{ height: 8, background: C.faint, borderRadius: 4 }}>
-                        <div style={{ height: "100%", borderRadius: 4, background: C.accent, width: `${Math.round(((batchIdx) / pairs.length) * 100)}%`, transition: "width 0.5s" }} />
-                      </div>
-                      <div style={{ fontSize: 11, color: C.muted, marginTop: 6 }}>
-                        ✓ {batchDone.length} добавлено · ✕ {batchErr.length} ошибок · осталось {pairs.length - batchIdx - 1}
-                      </div>
-                    </div>
-                  )}
 
                   <button onClick={runBatch} disabled={batchRun || pairs.every(p => !p.back)}
                     style={{ width:"100%", padding:"13px", background: batchRun ? C.border : C.accent, color: batchRun ? C.muted : C.bg, border:"none", borderRadius:8, fontSize:15, fontFamily:"inherit", fontWeight:"bold", cursor: batchRun ? "not-allowed" : "pointer" }}>
