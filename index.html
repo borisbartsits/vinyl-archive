@@ -1305,6 +1305,7 @@ function AddView({ onAdded }) {
   const [batchIdx, setBatchIdx] = useState(0);
   const [batchDone,setBatchDone]= useState([]);  // completed results
   const [batchErr, setBatchErr] = useState([]);
+  const [batchCooldown, setBatchCooldown] = useState(0); // секунды до следующего
   const batchRef = useRef();
 
   // ── Single helpers ───────────────────────────────────────────────────
@@ -1447,16 +1448,26 @@ function AddView({ onAdded }) {
         await dbSave(rec).catch(() => window.storage.set(id, JSON.stringify(rec)));
         onAdded(rec);
         done.push(rec);
+        setBalanceRefresh(r => r + 1); // обновить отображение баланса
       } catch (e) {
         console.error("[BATCH] Claude error for album", i+1, e.message);
         errs.push({ i, msg: e.message || "ошибка" });
       }
       setBatchDone([...done]); setBatchErr([...errs]);
-      // Пауза между запросами чтобы не словить rate limit
-      if (i < pairs.length - 1) await new Promise(r => setTimeout(r, 1500));
+      // Пауза с обратным отсчётом
+      if (i < pairs.length - 1) {
+        const WAIT = 6;
+        for (let s = WAIT; s > 0; s--) {
+          setBatchCooldown(s);
+          await new Promise(r => setTimeout(r, 1000));
+        }
+        setBatchCooldown(0);
+      }
     }
     setBatchRun(false);
     setBatchIdx(-1);
+    setBatchCooldown(0);
+    setBalanceRefresh(r => r + 1);
   };
 
   const resetBatch = () => {
@@ -1562,8 +1573,11 @@ function AddView({ onAdded }) {
                       <div style={{ height: 8, background: C.faint, borderRadius: 4, overflow: "hidden" }}>
                         <div style={{ height: "100%", borderRadius: 4, background: C.accent, width: `${Math.round((batchIdx / pairs.length) * 100)}%`, transition: "width 0.5s" }} />
                       </div>
-                      <div style={{ fontSize: 11, color: C.muted, marginTop: 6 }}>
-                        ✓ {batchDone.length} добавлено · ✕ {batchErr.length} ошибок · осталось {pairs.length - batchIdx - 1}
+                      <div style={{ fontSize: 11, color: C.muted, marginTop: 6, display: "flex", justifyContent: "space-between" }}>
+                        <span>✓ {batchDone.length} добавлено · ✕ {batchErr.length} ошибок · осталось {pairs.length - batchIdx - 1}</span>
+                        {batchCooldown > 0 && (
+                          <span style={{ color: C.accent, fontWeight: "bold" }}>⏱ следующий через {batchCooldown}с</span>
+                        )}
                       </div>
                     </div>
                   )}
