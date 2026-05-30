@@ -9,19 +9,10 @@
   <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,600;1,400;1,600&family=DM+Mono:wght@300;400&display=swap" rel="stylesheet"/>
   <link rel="manifest" href="manifest.json"/>
   <meta name="theme-color" content="#0D1B2A"/>
-  <meta name="description" content="Первый русскоязычный AI-каталог виниловых коллекций"/>
   <meta name="apple-mobile-web-app-capable" content="yes"/>
   <meta name="apple-mobile-web-app-title" content="vinyldarksea"/>
   <link rel="apple-touch-icon" href="icon.svg"/>
-  <style>
-    *{box-sizing:border-box;margin:0;padding:0}
-    body{background:#0D1B2A}
-    #root{min-height:100vh}
-    #splash{position:fixed;inset:0;background:#0D1B2A;display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:9999}
-    .sp-vinyl{animation:sp-spin 2s linear infinite}
-    @keyframes sp-spin{to{transform:rotate(360deg)}}
-    #errmsg{position:fixed;inset:0;background:#0D1B2A;display:none;color:#e08080;font:12px monospace;padding:20px;overflow:auto;white-space:pre-wrap;z-index:9999}
-  </style>
+  <style>*{box-sizing:border-box;margin:0;padding:0}body{background:#0D1B2A}#root{min-height:100vh}#splash{position:fixed;inset:0;background:#0D1B2A;display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:9999}.sp-vinyl{animation:sp-spin 2s linear infinite}@keyframes sp-spin{to{transform:rotate(360deg)}}#errmsg{position:fixed;inset:0;background:#0D1B2A;display:none;color:#e08080;font:12px monospace;padding:20px;overflow:auto;white-space:pre-wrap;z-index:9999}</style>
 </head>
 <body>
   <div id="splash">
@@ -2517,26 +2508,8 @@ function VinylCatalog() {
       let existing = await dbGetAll();
       setDbOk(true);
 
-      // Seed DB if empty
-      if (existing.length === 0) {
-        for (const rec of SEED) {
-          try { await dbSave(rec); } catch {}
-        }
-        existing = SEED;
-      } else {
-        // Patch missing price/thumbs from seed
-        const seedById = Object.fromEntries(SEED.map(r => [r.id, r]));
-        existing = await Promise.all(existing.map(async rec => {
-          const seed = seedById[rec.id];
-          if (!seed) return rec;
-          let u = { ...rec }; let changed = false;
-          if (!rec.price && seed.price)           { u.price = seed.price; changed = true; }
-          if (!rec.thumbFront && seed.thumbFront) { u.thumbFront = seed.thumbFront; u.thumb = seed.thumb; changed = true; }
-          if (!rec.thumbBack && seed.thumbBack)   { u.thumbBack = seed.thumbBack; changed = true; }
-          if (changed) { try { await dbSave(u); } catch {} }
-          return u;
-        }));
-      }
+      // Новый пользователь — пустая коллекция (seed НЕ записывается в БД)
+      // existing остаётся пустым массивом
 
       setRecords(existing.sort((a,b) => (a.artist||"").localeCompare(b.artist||"")));
     } catch (e) {
